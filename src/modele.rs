@@ -37,6 +37,8 @@ pub enum EtatTicket {
 pub enum CauseOrphelin {
     Silence,
     Bail,
+    /// La liaison de la session (processus MCP) s'est fermée : réservation gardée pendant `delai.reprise`, sans gel.
+    Connexion,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +98,14 @@ pub struct Ticket {
     /// Tickets passés devant celui-ci pendant qu'il était tête de file bloquée (anti-famine).
     #[serde(default)]
     pub doublages: u32,
+    /// Liaison (connexion d'un processus MCP) qui a créé le ticket, et identité de sa session pour la reprise.
+    #[serde(default)]
+    pub liaison: Option<u64>,
+    #[serde(default)]
+    pub identite: Option<String>,
+    /// Liaison perdue à cette heure : une nouvelle liaison de la même identité reprend le ticket avant `delai.reprise`.
+    #[serde(default)]
+    pub perdu: Option<u64>,
     #[serde(skip)]
     pub presence: u64,
     #[serde(skip)]
@@ -210,6 +220,24 @@ pub struct Demande {
     /// Le client confirmera la réception d'un feu vert immédiat par `/tickets/{n}/recu`.
     #[serde(default)]
     pub accuse: bool,
+}
+
+/// Ouverture d'une liaison : la connexion qui la porte représente la session tant qu'elle reste ouverte.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Liaison {
+    /// Clé stable de la session (identifiant Claude ou Codex, sinon PID ou dossier), qui permet la reprise.
+    pub identite: String,
+    pub session: String,
+    #[serde(default)]
+    pub client: String,
+    #[serde(default)]
+    pub mesures: Option<MesuresWsl>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Battement {
+    #[serde(default)]
+    pub mesures: Option<MesuresWsl>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

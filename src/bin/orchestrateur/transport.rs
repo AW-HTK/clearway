@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use commun::protocole::{RELAIS_PERDU, lire_ligne};
@@ -11,36 +11,67 @@ pub use imp::{Ecoute, ecouter, instance_unique, relais};
 
 const MAX_CONNEXIONS: usize = 64;
 
-/// Recopie une requête de stdin vers le tube, puis sa réponse vers stdout, jusqu'à la fin de stdin.
-fn pomper(tube_lecture: impl Read, mut tube_ecriture: impl Write) -> i32 {
+/// Requêtes sans `id` envoyées et réponses sans `id` reçues : à la fin de stdin, le relais rend encore celles-là.
+#[derive(Default)]
+struct Sequentielles {
+    envoyees: u64,
+    recues: u64,
+    tube_ferme: bool,
+}
+
+fn sans_id(ligne: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(ligne).map_or(true, |v| v.get("id").is_none_or(|i| i.is_null()))
+}
+
+/// Relaie dans les deux sens à la fois : lignes de stdin vers le tube, lignes du tube vers stdout dès qu'elles arrivent,
+/// ce qui permet plusieurs requêtes `id` en cours. À la fin de stdin, le relais attend les réponses aux requêtes sans `id`
+/// (`echo … | relais`), mais pas celles des requêtes `id` : un client multiplexé qui part doit fermer sa liaison aussitôt.
+fn pomper(tube_lecture: impl Read + Send + 'static, mut tube_ecriture: impl Write) -> i32 {
+    let etat = Arc::new((Mutex::new(Sequentielles::default()), Condvar::new()));
+    {
+        let etat = etat.clone();
+        std::thread::spawn(move || {
+            let mut retour = BufReader::new(tube_lecture);
+            let mut sortie = io::stdout();
+            while let Ok(Some(r)) = lire_ligne(&mut retour) {
+                if writeln!(sortie, "{r}").and_then(|_| sortie.flush()).is_err() {
+                    std::process::exit(0);
+                }
+                if sans_id(&r) {
+                    etat.0.lock().unwrap_or_else(|e| e.into_inner()).recues += 1;
+                    etat.1.notify_all();
+                }
+            }
+            etat.0.lock().unwrap_or_else(|e| e.into_inner()).tube_ferme = true;
+            etat.1.notify_all();
+            eprintln!("relais : l'orchestrateur a fermé le tube.");
+            std::process::exit(RELAIS_PERDU);
+        });
+    }
     let mut entree = io::stdin().lock();
-    let mut sortie = io::stdout().lock();
-    let mut retour = BufReader::new(tube_lecture);
     loop {
         let mut ligne = String::new();
         match entree.read_line(&mut ligne) {
-            Ok(0) | Err(_) => return 0,
+            Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
         if !ligne.ends_with('\n') {
             ligne.push('\n');
         }
+        if !ligne.trim().is_empty() && sans_id(&ligne) {
+            etat.0.lock().unwrap_or_else(|e| e.into_inner()).envoyees += 1;
+        }
         if tube_ecriture.write_all(ligne.as_bytes()).and_then(|_| tube_ecriture.flush()).is_err() {
             eprintln!("relais : l'orchestrateur a fermé le tube.");
             return RELAIS_PERDU;
         }
-        match lire_ligne(&mut retour) {
-            Ok(Some(r)) => {
-                if writeln!(sortie, "{r}").and_then(|_| sortie.flush()).is_err() {
-                    return 0;
-                }
-            }
-            _ => {
-                eprintln!("relais : l'orchestrateur a fermé le tube avant de répondre.");
-                return RELAIS_PERDU;
-            }
-        }
     }
+    let (verrou, signal) = &*etat;
+    let mut e = verrou.lock().unwrap_or_else(|e| e.into_inner());
+    while e.recues < e.envoyees && !e.tube_ferme {
+        e = signal.wait(e).unwrap_or_else(|e| e.into_inner());
+    }
+    0
 }
 
 struct Compteur(Arc<AtomicUsize>);
@@ -67,10 +98,12 @@ pub fn servir(mut ecoute: Ecoute, p: Arc<Partage>) {
         }
         let garde = Compteur(actives.clone());
         let p = p.clone();
+        let flux = Arc::new(flux);
         let lance = std::thread::Builder::new().stack_size(256 * 1024).spawn(move || {
             let _garde = garde;
             if let Ok((lecture, ecriture)) = flux.parties() {
-                serveur::servir_connexion(&p, lecture, ecriture, &|| flux.vivant());
+                let sonde = flux.clone();
+                serveur::servir_connexion(&p, lecture, ecriture, serveur::Contexte::nouveau(move || sonde.vivant()));
             }
         });
         if lance.is_err() {
@@ -81,16 +114,19 @@ pub fn servir(mut ecoute: Ecoute, p: Arc<Partage>) {
 
 #[cfg(windows)]
 mod imp {
-    use std::fs::File;
     use std::io::{self, Read, Write};
-    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use commun::protocole::{RELAIS_ABSENT, RELAIS_PERDU};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
-        ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING,
+        ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError,
+        HANDLE, INVALID_HANDLE_VALUE, LocalFree,
     };
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, ReadFile, WriteFile};
+    use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::CreateEventW;
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
@@ -101,6 +137,75 @@ mod imp {
         PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
     };
     use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
+
+    /// Tube ouvert en E/S asynchrone : sur un handle synchrone, une lecture en cours bloquerait les écritures des autres fils.
+    pub struct Tube(HANDLE);
+
+    // Chaque opération a sa propre structure OVERLAPPED et son propre événement.
+    unsafe impl Send for Tube {}
+    unsafe impl Sync for Tube {}
+
+    impl Drop for Tube {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    impl Tube {
+        /// Lance une opération asynchrone et attend sa fin.
+        fn operation(&self, lancer: impl FnOnce(*mut OVERLAPPED) -> i32) -> io::Result<usize> {
+            unsafe {
+                let evenement = CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
+                if evenement.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                let mut ov: OVERLAPPED = std::mem::zeroed();
+                ov.hEvent = evenement;
+                let mut n = 0u32;
+                let resultat = if lancer(&mut ov) != 0 || GetLastError() == ERROR_IO_PENDING {
+                    if GetOverlappedResult(self.0, &ov, &mut n, 1) != 0 { Ok(n as usize) } else { Err(io::Error::last_os_error()) }
+                } else {
+                    Err(io::Error::last_os_error())
+                };
+                CloseHandle(evenement);
+                resultat
+            }
+        }
+
+        fn lire(&self, tampon: &mut [u8]) -> io::Result<usize> {
+            let longueur = tampon.len().min(u32::MAX as usize) as u32;
+            let h = self.0;
+            match self.operation(|ov| unsafe { ReadFile(h, tampon.as_mut_ptr(), longueur, std::ptr::null_mut(), ov) }) {
+                Err(e) if [ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED].map(|c| c as i32).contains(&e.raw_os_error().unwrap_or(0)) => Ok(0),
+                r => r,
+            }
+        }
+
+        fn ecrire(&self, tampon: &[u8]) -> io::Result<usize> {
+            let longueur = tampon.len().min(u32::MAX as usize) as u32;
+            let h = self.0;
+            self.operation(|ov| unsafe { WriteFile(h, tampon.as_ptr(), longueur, std::ptr::null_mut(), ov) })
+        }
+    }
+
+    pub struct Lecteur(Arc<Tube>);
+    pub struct Ecrivain(Arc<Tube>);
+
+    impl Read for Lecteur {
+        fn read(&mut self, tampon: &mut [u8]) -> io::Result<usize> {
+            self.0.lire(tampon)
+        }
+    }
+
+    impl Write for Ecrivain {
+        fn write(&mut self, tampon: &[u8]) -> io::Result<usize> {
+            self.0.ecrire(tampon)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn large(s: &str) -> Vec<u16> {
         s.encode_utf16().chain([0]).collect()
@@ -183,7 +288,7 @@ mod imp {
             let h = unsafe {
                 CreateNamedPipeW(
                     self.nom.as_ptr(),
-                    PIPE_ACCESS_DUPLEX | if premiere { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 },
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | if premiere { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 },
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                     PIPE_UNLIMITED_INSTANCES,
                     64 * 1024,
@@ -208,14 +313,30 @@ mod imp {
                 Some(h) => h,
                 None => self.creer(false)?,
             };
-            let connecte = unsafe { ConnectNamedPipe(h, std::ptr::null_mut()) } != 0
-                || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
-            if !connecte {
-                let e = io::Error::last_os_error();
-                unsafe { CloseHandle(h) };
-                return Err(e);
-            }
-            Ok(Flux { fichier: unsafe { File::from_raw_handle(h) } })
+            let tube = Tube(h);
+            // Client déjà connecté entre la création et l'attente : l'événement ne sera jamais signalé.
+            let connecte = unsafe {
+                let evenement = CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
+                if evenement.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                let mut ov: OVERLAPPED = std::mem::zeroed();
+                ov.hEvent = evenement;
+                let mut n = 0u32;
+                let r = if ConnectNamedPipe(h, &mut ov) != 0 {
+                    Ok(())
+                } else {
+                    match GetLastError() {
+                        ERROR_PIPE_CONNECTED => Ok(()),
+                        ERROR_IO_PENDING if GetOverlappedResult(h, &ov, &mut n, 1) != 0 => Ok(()),
+                        ERROR_IO_PENDING => Err(io::Error::last_os_error()),
+                        e => Err(io::Error::from_raw_os_error(e as i32)),
+                    }
+                };
+                CloseHandle(evenement);
+                r
+            };
+            connecte.map(|()| Flux { tube: Arc::new(tube) })
         }
     }
 
@@ -235,19 +356,19 @@ mod imp {
     }
 
     pub struct Flux {
-        fichier: File,
+        tube: Arc<Tube>,
     }
 
     impl Flux {
-        pub fn parties(&self) -> io::Result<(Box<dyn Read + '_>, Box<dyn Write + '_>)> {
-            Ok((Box::new(&self.fichier), Box::new(&self.fichier)))
+        pub fn parties(&self) -> io::Result<(Box<dyn Read + Send>, Box<dyn Write + Send>)> {
+            Ok((Box::new(Lecteur(self.tube.clone())), Box::new(Ecrivain(self.tube.clone()))))
         }
 
         pub fn vivant(&self) -> bool {
             let mut disponible = 0u32;
             unsafe {
                 PeekNamedPipe(
-                    self.fichier.as_raw_handle(),
+                    self.tube.0,
                     std::ptr::null_mut(),
                     0,
                     std::ptr::null_mut(),
@@ -269,7 +390,7 @@ mod imp {
                     0,
                     std::ptr::null(),
                     OPEN_EXISTING,
-                    0,
+                    FILE_FLAG_OVERLAPPED,
                     std::ptr::null_mut(),
                 )
             };
@@ -290,8 +411,8 @@ mod imp {
                 }
             }
         };
-        let fichier = unsafe { File::from_raw_handle(h) };
-        super::pomper(&fichier, &fichier)
+        let tube = Arc::new(Tube(h));
+        super::pomper(Lecteur(tube.clone()), Ecrivain(tube))
     }
 }
 
@@ -347,8 +468,8 @@ mod imp {
     }
 
     impl Flux {
-        pub fn parties(&self) -> io::Result<(Box<dyn Read + '_>, Box<dyn Write + '_>)> {
-            Ok((Box::new(self.flux.try_clone()?), Box::new(&self.flux)))
+        pub fn parties(&self) -> io::Result<(Box<dyn Read + Send>, Box<dyn Write + Send>)> {
+            Ok((Box::new(self.flux.try_clone()?), Box::new(self.flux.try_clone()?)))
         }
 
         pub fn vivant(&self) -> bool {

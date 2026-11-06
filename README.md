@@ -19,6 +19,14 @@ cargo test -j 4    # unitaires + intégration (serveur en version Linux sur sock
 - `charge` lance `orchestrateur.exe relais --tube <nom>` par l'interop WSL (stdin/stdout ↔ tube).
   Relais : code 69 si l'orchestrateur est absent (le client le lance alors une fois), 74 si le tube se ferme.
 - Hors Windows (tests), le tube est une socket Unix `$XDG_RUNTIME_DIR/orchestrateur-<tube>.sock`.
+- Multiplexage : une requête avec `"id"` est traitée sur son propre fil et sa réponse porte le même `id`, dans
+  n'importe quel ordre ; sans `id`, l'ancien mode séquentiel. Le relais copie dans les deux sens à la fois (tube
+  en E/S asynchrone sous Windows) ; à la fin de stdin, il rend encore les réponses aux requêtes sans `id`.
+- Liaison : `POST /liaison` (`identite`, `session`, `client`, `mesures`) lie la connexion à une session (processus
+  MCP), `POST /liaison/battement` y porte les mesures WSL et la présence de ses tickets actifs. À la fermeture de
+  la connexion, ses tickets attendent `delai.reprise` (2 min) une nouvelle liaison de la même `identite` (actifs :
+  orphelins « connexion », réservés, sans gel ; en attente : sautés), puis sont retirés. Même règle après un
+  redémarrage de l'orchestrateur.
 
 ## Installer
 

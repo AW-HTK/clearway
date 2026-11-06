@@ -71,6 +71,9 @@ fn ticket(id: u64, cote: Cote, ram_go: f64, cpu: u32, duree_min: u64) -> Ticket 
         base_ram_wsl_mo: None,
         base_vmmem_mo: None,
         doublages: 0,
+        liaison: None,
+        identite: None,
+        perdu: None,
         presence: H,
         ecoutes: 1,
     }
@@ -900,4 +903,41 @@ fn repli_ram_wsl_affiche_comme_estimation() {
     assert!(ram_wsl(&plein, H).libre_lisible().ends_with("aucune mesure WSL"));
     plein.vmmem = None;
     assert_eq!(ram_wsl(&plein, H).estimation, None, "WSL arrêté : pas d'estimation");
+}
+
+#[test]
+fn liaison_perdue_reprise_ou_liberation() {
+    let c = config();
+    let mut actif_lie = actif(ticket(1, Cote::Wsl, 2.0, 2, 30), H, 8.0);
+    actif_lie.manuel = true;
+    actif_lie.liaison = Some(5);
+    actif_lie.perdu = Some(H + 100);
+    let mut attente_lie = ticket(2, Cote::Wsl, 1.0, 1, 10);
+    attente_lie.liaison = Some(5);
+    attente_lie.perdu = Some(H + 100);
+    let mut autre = ticket(3, Cote::Wsl, 1.0, 1, 10);
+    autre.presence = H + 110;
+    let e = etat(vec![actif_lie, attente_lie, autre]);
+
+    // Pendant delai.reprise : l'actif devient orphelin « connexion » sans geler, l'attente est sautée, les autres passent.
+    let p = planifier(&e, &large(), &c, H + 110);
+    assert_eq!(p.evenements, vec![Evenement::FeuVert(3)]);
+    let t = p.etat.ticket(1).unwrap();
+    assert_eq!((t.etat, t.cause_orphelin), (EtatTicket::Orphelin, Some(CauseOrphelin::Connexion)));
+    assert!(p.gel.is_empty(), "{:?}", p.gel);
+    assert!(niveaux(&p.etat, &large(), &c, H + 110)[Reserve::RamWsl.i()].par.contains(&1), "réservation gardée");
+    let phrase = &p.raisons[&1].phrase;
+    assert!(phrase.contains("liaison de sa session perdue") && phrase.contains("sans geler"), "{phrase}");
+    assert!(phrase.contains(&format!("libéré à {}", hhmm(H + 220))), "{phrase}");
+    let phrase = &p.raisons[&2].phrase;
+    assert_eq!(p.raisons[&2].reserve.as_deref(), Some("absent"));
+    assert!(phrase.contains(&format!("place gardée jusqu'à {}", hhmm(H + 220))), "{phrase}");
+
+    // Au-delà de delai.reprise sans nouvelle liaison : tous deux sortent de la file.
+    let p = planifier(&p.etat, &large(), &c, H + 220);
+    assert_eq!(
+        p.evenements,
+        vec![Evenement::Libere(1, Liberation::SessionFermee), Evenement::Libere(2, Liberation::SessionFermee)]
+    );
+    assert!(p.etat.ticket(1).is_none() && p.etat.ticket(2).is_none() && p.etat.ticket(3).is_some());
 }

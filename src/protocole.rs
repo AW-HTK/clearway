@@ -12,8 +12,12 @@ pub const RELAIS_ABSENT: i32 = 69;
 pub const RELAIS_PERDU: i32 = 74;
 
 /// Une requête par ligne JSON : les routes logiques de la section 6, sans HTTP.
+/// Avec un `id`, elle est traitée en parallèle des autres et sa réponse porte le même `id`, dans n'importe quel ordre ;
+/// sans `id`, elle est traitée avant de lire la suivante (anciens clients).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Requete {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     pub methode: String,
     pub chemin: String,
     #[serde(default)]
@@ -24,7 +28,7 @@ pub struct Requete {
 
 impl Requete {
     pub fn nouvelle(methode: &str, chemin: &str, corps: Value) -> Requete {
-        Requete { methode: methode.into(), chemin: chemin.into(), parametres: BTreeMap::new(), corps }
+        Requete { id: None, methode: methode.into(), chemin: chemin.into(), parametres: BTreeMap::new(), corps }
     }
 
     pub fn segments(&self) -> Vec<&str> {
@@ -38,6 +42,8 @@ impl Requete {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     pub code: u16,
     #[serde(default)]
     pub corps: Value,
@@ -81,6 +87,9 @@ mod tests {
         let deux: Requete = serde_json::from_str(&lire_ligne(&mut lecteur).unwrap().unwrap()).unwrap();
         assert_eq!(deux.chemin, "/etat");
         assert!(lire_ligne(&mut lecteur).unwrap().is_none());
+        assert!(!ligne.contains("\"id\""), "sans id, rien n'est ajouté pour les anciens serveurs : {ligne}");
+        let avec: Requete = serde_json::from_str("{\"id\":7,\"methode\":\"GET\",\"chemin\":\"/etat\"}").unwrap();
+        assert_eq!(avec.id, Some(7));
     }
 
     #[test]

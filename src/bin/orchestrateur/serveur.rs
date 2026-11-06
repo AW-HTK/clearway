@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use commun::config::Config;
 use commun::format::{duree, go};
 use commun::modele::{
-    Besoin, CauseOrphelin, Demande, Etat, EtatTicket, Fin, Mesures, MesuresWsl, Presence, Prolonge, Raison, Statut,
+    Battement, Besoin, CauseOrphelin, Demande, Liaison, Etat, EtatTicket, Fin, Mesures, MesuresWsl, Presence, Prolonge, Raison, Statut,
     Ticket, TypeDecision, Vue, VueTicket,
 };
 use commun::planif::{self, Evenement, Liberation, Reserve};
@@ -21,6 +22,13 @@ const MEMOIRE_TERMINES: usize = 200;
 const PRESSION_AVANT_BULLE_S: u64 = 120;
 const INTERVALLE_BULLES_S: u64 = 30 * 60;
 const RAM_CRITIQUE_MO: u64 = 1024;
+const MAX_EN_COURS_PAR_CONNEXION: usize = 32;
+
+/// Liaison ouverte : un processus MCP de session, tant que sa connexion reste ouverte.
+struct LiaisonVive {
+    identite: String,
+    session: String,
+}
 
 /// Règle des bulles : au plus une par genre toutes les 30 min ; une pression n'en donne qu'après 2 min
 /// continues, et seulement si un ticket attend. Le reste va au journal et dans l'infobulle.
@@ -70,6 +78,8 @@ pub struct Serveur {
     bulles: Bulles,
     historique_swap: VecDeque<(u64, u64)>,
     erreur_persistance: bool,
+    liaisons: BTreeMap<u64, LiaisonVive>,
+    compteur_liaisons: u64,
 }
 
 pub struct Partage {
@@ -216,6 +226,10 @@ impl Serveur {
         let now = maintenant();
         for t in &mut etat.tickets {
             t.presence = now;
+            // Les connexions ne survivent pas au redémarrage : la session a `delai.reprise` pour se relier.
+            if t.liaison.is_some() && t.perdu.is_none() {
+                t.perdu = Some(now);
+            }
         }
         let mut s = Serveur {
             etat,
@@ -231,6 +245,8 @@ impl Serveur {
             bulles: Bulles::default(),
             historique_swap: VecDeque::new(),
             erreur_persistance: false,
+            liaisons: BTreeMap::new(),
+            compteur_liaisons: 0,
         };
         s.persister(&s.etat).map_err(|e| format!("écriture de etat.json : {e}"))?;
         let repris = s.etat.tickets.len();
@@ -344,6 +360,10 @@ impl Serveur {
                     let quoi = ancien.ticket(id).map(resume).unwrap_or_default();
                     let phrase = match motif {
                         Liberation::WslArrete => format!("Ticket #{id} libéré : WSL s'est arrêté ou a redémarré."),
+                        Liberation::SessionFermee => format!(
+                            "Ticket #{id} retiré : liaison de sa session perdue, sans reprise en {}.",
+                            duree(self.config.delai_reprise_s)
+                        ),
                     };
                     self.journal(&format!("LIBÉRÉ #{id} {quoi} · {phrase}"));
                     self.terminer(id, "libere", phrase);
@@ -504,7 +524,7 @@ impl Serveur {
 }
 
 fn reponse(code: u16, corps: Value) -> Reponse {
-    Reponse { code, corps }
+    Reponse { id: None, code, corps }
 }
 
 fn erreur(code: u16, texte: &str) -> Reponse {
@@ -679,12 +699,37 @@ impl Partage {
     }
 }
 
-pub fn traiter(p: &Partage, req: &Requete, vivant: &dyn Fn() -> bool) -> Reponse {
+/// Ce que le serveur sait de la connexion qui porte une requête.
+pub struct Contexte {
+    sonde: Box<dyn Fn() -> bool + Send + Sync>,
+    fermee: AtomicBool,
+    liaison: Mutex<Option<u64>>,
+}
+
+impl Contexte {
+    /// `sonde` dit si le client est encore là quand le fil de lecture ne lit pas (requêtes sans `id`).
+    pub fn nouveau(sonde: impl Fn() -> bool + Send + Sync + 'static) -> Arc<Contexte> {
+        Arc::new(Contexte { sonde: Box::new(sonde), fermee: AtomicBool::new(false), liaison: Mutex::new(None) })
+    }
+
+    fn vivant(&self) -> bool {
+        !self.fermee.load(Ordering::SeqCst) && (self.sonde)()
+    }
+
+    fn liaison(&self) -> Option<u64> {
+        *self.liaison.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+pub fn traiter(p: &Partage, req: &Requete, ctx: &Contexte) -> Reponse {
+    let vivant = &|| ctx.vivant();
     let segments = req.segments();
     let id = |s: &str| s.parse::<u64>().ok();
     let invalide = || erreur(404, "ticket invalide");
     match (req.methode.as_str(), segments.as_slice()) {
-        ("POST", ["tickets"]) => creer(p, req),
+        ("POST", ["tickets"]) => creer(p, req, ctx),
+        ("POST", ["liaison"]) => lier(p, req, ctx),
+        ("POST", ["liaison", "battement"]) => battre(p, req, ctx),
         ("GET", ["tickets", n, "attente"]) => id(n).map_or_else(invalide, |i| attendre(p, req, i, vivant)),
         ("POST", ["tickets", n, "recu"]) => id(n).map_or_else(invalide, |i| accuser(p, i)),
         ("POST", ["tickets", n, "presence"]) => id(n).map_or_else(invalide, |i| presence(p, req, i)),
@@ -712,7 +757,7 @@ pub fn traiter(p: &Partage, req: &Requete, vivant: &dyn Fn() -> bool) -> Reponse
     }
 }
 
-fn creer(p: &Partage, req: &Requete) -> Reponse {
+fn creer(p: &Partage, req: &Requete, ctx: &Contexte) -> Reponse {
     let d: Demande = match serde_json::from_value(req.corps.clone()) {
         Ok(d) => d,
         Err(e) => return erreur(400, &format!("demande illisible : {e}")),
@@ -761,6 +806,8 @@ fn creer(p: &Partage, req: &Requete) -> Reponse {
         p.publier(s);
         return rep;
     }
+    let liaison = ctx.liaison();
+    let identite = liaison.and_then(|l| s.liaisons.get(&l)).map(|l| l.identite.clone());
     let mut candidat = s.etat.clone();
     candidat.compteur += 1;
     let id = candidat.compteur;
@@ -792,6 +839,9 @@ fn creer(p: &Partage, req: &Requete) -> Reponse {
         base_ram_wsl_mo: None,
         base_vmmem_mo: None,
         doublages: 0,
+        liaison,
+        identite,
+        perdu: None,
         presence: now,
         ecoutes: 0,
     };
@@ -871,7 +921,7 @@ fn presence(p: &Partage, req: &Requete, id: u64) -> Reponse {
     };
     t.presence = now;
     let (etat, cause, recu) = (t.etat, t.cause_orphelin, t.recu);
-    if etat == EtatTicket::Orphelin && cause != Some(CauseOrphelin::Bail) {
+    if etat == EtatTicket::Orphelin && !matches!(cause, Some(CauseOrphelin::Bail | CauseOrphelin::Connexion)) {
         let mut candidat = s.etat.clone();
         if let Some(c) = candidat.ticket_mut(id) {
             c.etat = EtatTicket::Actif;
@@ -954,22 +1004,159 @@ fn prolonger(p: &Partage, req: &Requete, id: u64) -> Reponse {
     rep
 }
 
-/// Sert une connexion : une requête JSON par ligne, une réponse par ligne, jusqu'à la fin du flux.
-pub fn servir_connexion(p: &Partage, lecture: impl Read, mut ecriture: impl Write, vivant: &dyn Fn() -> bool) {
+fn lier(p: &Partage, req: &Requete, ctx: &Contexte) -> Reponse {
+    let l: Liaison = match serde_json::from_value(req.corps.clone()) {
+        Ok(l) => l,
+        Err(e) => return erreur(400, &format!("liaison illisible : {e}")),
+    };
+    if l.identite.trim().is_empty() {
+        return erreur(400, "liaison sans identité de session");
+    }
+    let mut garde = ctx.liaison.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(deja) = *garde {
+        return erreur(409, &format!("Liaison #{deja} déjà ouverte sur cette connexion."));
+    }
+    let now = maintenant();
+    let mut s = p.verrou();
+    s.maj_wsl(l.mesures, now);
+    s.compteur_liaisons += 1;
+    let id = s.compteur_liaisons;
+    s.liaisons.insert(id, LiaisonVive { identite: l.identite.clone(), session: l.session.clone() });
+    let mut candidat = s.etat.clone();
+    let mut repris = Vec::new();
+    for t in candidat.tickets.iter_mut().filter(|t| t.perdu.is_some() && t.identite.as_deref() == Some(l.identite.as_str())) {
+        t.liaison = Some(id);
+        t.perdu = None;
+        t.presence = now;
+        if t.etat == EtatTicket::Orphelin && t.cause_orphelin == Some(CauseOrphelin::Connexion) {
+            t.etat = EtatTicket::Actif;
+            t.cause_orphelin = None;
+        }
+        repris.push(t.id);
+    }
+    *garde = Some(id);
+    let suite = if repris.is_empty() {
+        "aucun ticket à reprendre".to_owned()
+    } else {
+        let ids: Vec<String> = repris.iter().map(|i| format!("#{i}")).collect();
+        format!("reprise de {}", ids.join(", "))
+    };
+    let prelude = format!("LIAISON #{id} ouverte [{}] {} · {suite}", l.session, l.client);
+    let rep = match s.valider(candidat, !repris.is_empty(), None, Some(prelude)) {
+        Ok(()) => reponse(200, json!({ "liaison": id, "epoque": s.etat.epoque, "repris": repris })),
+        Err(e) => {
+            s.liaisons.remove(&id);
+            *garde = None;
+            erreur(503, &e)
+        }
+    };
+    p.publier(s);
+    rep
+}
+
+fn battre(p: &Partage, req: &Requete, ctx: &Contexte) -> Reponse {
+    let Some(l) = ctx.liaison() else {
+        return erreur(409, "Aucune liaison sur cette connexion : POST /liaison d'abord.");
+    };
+    let b: Battement = serde_json::from_value(req.corps.clone()).unwrap_or_default();
+    let now = maintenant();
+    let mut s = p.verrou();
+    s.maj_wsl(b.mesures, now);
+    // Les tickets en attente ne comptent que les attentes réelles : une session vivante n'y garde pas sa place sans écouter.
+    for t in s.etat.tickets.iter_mut().filter(|t| t.liaison == Some(l) && t.etat != EtatTicket::Attente) {
+        t.presence = now;
+    }
+    let candidat = s.etat.clone();
+    let _ = s.valider(candidat, false, None, None);
+    let rep = reponse(200, json!({ "liaison": l, "epoque": s.etat.epoque }));
+    p.publier(s);
+    rep
+}
+
+impl Partage {
+    fn reveiller(&self) {
+        let _s = self.verrou();
+        self.signal.notify_all();
+    }
+
+    /// Connexion d'une liaison fermée : ses tickets attendent une reprise par la même session pendant `delai.reprise`.
+    fn liaison_fermee(&self, l: u64) {
+        let now = maintenant();
+        let mut s = self.verrou();
+        let session = s.liaisons.remove(&l).map(|v| v.session).unwrap_or_default();
+        let mut candidat = s.etat.clone();
+        let mut gardes = Vec::new();
+        for t in candidat.tickets.iter_mut().filter(|t| t.liaison == Some(l) && t.perdu.is_none()) {
+            t.perdu = Some(now);
+            gardes.push(format!("#{}", t.id));
+        }
+        let suite = if gardes.is_empty() {
+            "aucun ticket".to_owned()
+        } else {
+            format!("{} gardé(s) jusqu'à {} pour une reprise", gardes.join(", "), hhmm(now + s.config.delai_reprise_s))
+        };
+        let _ = s.valider(candidat, !gardes.is_empty(), None, Some(format!("LIAISON #{l} fermée [{session}] · {suite}")));
+        self.publier(s);
+    }
+}
+
+fn envoyer(ecriture: &Mutex<Box<dyn Write + Send>>, rep: &Reponse) -> bool {
+    let mut texte = serde_json::to_string(rep).unwrap_or_else(|_| "{\"code\":500}".into());
+    texte.push('\n');
+    let mut e = ecriture.lock().unwrap_or_else(|e| e.into_inner());
+    e.write_all(texte.as_bytes()).and_then(|_| e.flush()).is_ok()
+}
+
+/// Sert une connexion jusqu'à la fin du flux : une requête JSON par ligne, une réponse par ligne. Les requêtes avec `id`
+/// sont traitées chacune sur son fil et peuvent répondre dans le désordre ; les autres, l'une après l'autre.
+pub fn servir_connexion(p: &Arc<Partage>, lecture: impl Read, ecriture: Box<dyn Write + Send>, ctx: Arc<Contexte>) {
+    let ecriture = Arc::new(Mutex::new(ecriture));
+    let en_cours = Arc::new(AtomicUsize::new(0));
     let mut lecteur = BufReader::new(lecture);
     while let Ok(Some(ligne)) = lire_ligne(&mut lecteur) {
         if ligne.trim().is_empty() {
             continue;
         }
-        let rep = match serde_json::from_str::<Requete>(&ligne) {
-            Ok(r) => traiter(p, &r, vivant),
-            Err(e) => erreur(400, &format!("requête illisible : {e}")),
+        let req = match serde_json::from_str::<Requete>(&ligne) {
+            Ok(r) => r,
+            Err(e) => {
+                if !envoyer(&ecriture, &erreur(400, &format!("requête illisible : {e}"))) {
+                    break;
+                }
+                continue;
+            }
         };
-        let mut texte = serde_json::to_string(&rep).unwrap_or_else(|_| "{\"code\":500}".into());
-        texte.push('\n');
-        if ecriture.write_all(texte.as_bytes()).and_then(|_| ecriture.flush()).is_err() {
-            break;
+        let Some(id) = req.id else {
+            if !envoyer(&ecriture, &traiter(p, &req, &ctx)) {
+                break;
+            }
+            continue;
+        };
+        if en_cours.fetch_add(1, Ordering::SeqCst) >= MAX_EN_COURS_PAR_CONNEXION {
+            en_cours.fetch_sub(1, Ordering::SeqCst);
+            let mut rep = erreur(429, "trop de requêtes en cours sur cette connexion");
+            rep.id = Some(id);
+            envoyer(&ecriture, &rep);
+            continue;
         }
+        let (p2, ctx2, ecriture2, en_cours2) = (p.clone(), ctx.clone(), ecriture.clone(), en_cours.clone());
+        let lance = std::thread::Builder::new().stack_size(256 * 1024).spawn(move || {
+            let mut rep = traiter(&p2, &req, &ctx2);
+            rep.id = Some(id);
+            envoyer(&ecriture2, &rep);
+            en_cours2.fetch_sub(1, Ordering::SeqCst);
+        });
+        if lance.is_err() {
+            en_cours.fetch_sub(1, Ordering::SeqCst);
+            let mut rep = erreur(503, "fil de traitement impossible à lancer");
+            rep.id = Some(id);
+            envoyer(&ecriture, &rep);
+        }
+    }
+    ctx.fermee.store(true, Ordering::SeqCst);
+    p.reveiller();
+    if let Some(l) = ctx.liaison() {
+        p.liaison_fermee(l);
     }
 }
 

@@ -8,7 +8,8 @@ use commun::protocole::{RELAIS_ABSENT, chemin_socket};
 use serde_json::{Value, json};
 
 const CONFIG_RAPIDE: &str = "marge.ram_windows = \"4G\"\n\
-    delai.actif = \"3s\"\ndelai.attente = \"4s\"\ndelai.absence = \"8s\"\ndelai.rappel = \"3s\"\ndelai.long_poll = \"2s\"\n";
+    delai.actif = \"3s\"\ndelai.attente = \"4s\"\ndelai.absence = \"8s\"\ndelai.rappel = \"3s\"\ndelai.long_poll = \"2s\"\n\
+    delai.reprise = \"3s\"\n";
 
 struct Orchestre {
     enfant: Option<Child>,
@@ -130,6 +131,51 @@ impl Orchestre {
 
     fn journal(&self) -> String {
         std::fs::read_to_string(self.dossier.join("journal.log")).unwrap_or_default()
+    }
+}
+
+/// Connexion gardée ouverte, comme celle d'un processus MCP : plusieurs requêtes, éventuellement en parallèle.
+struct Ligne {
+    flux: UnixStream,
+    lecteur: BufReader<UnixStream>,
+}
+
+impl Ligne {
+    fn ouvrir(o: &Orchestre) -> Ligne {
+        let flux = UnixStream::connect(chemin_socket(&o.tube)).unwrap();
+        let lecteur = BufReader::new(flux.try_clone().unwrap());
+        Ligne { flux, lecteur }
+    }
+
+    fn envoyer(&mut self, requete: Value) {
+        self.flux.write_all(format!("{requete}\n").as_bytes()).unwrap();
+    }
+
+    fn lire(&mut self) -> Value {
+        let mut ligne = String::new();
+        self.lecteur.read_line(&mut ligne).unwrap();
+        serde_json::from_str(&ligne).unwrap()
+    }
+
+    fn appel(&mut self, methode: &str, chemin: &str, corps: Value) -> Value {
+        self.envoyer(json!({ "methode": methode, "chemin": chemin, "corps": corps }));
+        self.lire()
+    }
+
+    fn lier(&mut self, identite: &str) -> Value {
+        self.appel("POST", "/liaison", json!({ "identite": identite, "session": "essai MCP", "client": "test" }))
+    }
+
+    fn creer(&mut self, requete: &str, ram_mo: u64) -> Value {
+        self.appel(
+            "POST",
+            "/tickets",
+            json!({
+                "requete_id": requete, "cote": "windows", "ram_mo": ram_mo, "cpu": 1, "duree_s": 600, "manuel": true,
+                "description": format!("essai {requete}"), "session": "essai MCP", "claude_session_id": null,
+                "claude_pid": null, "dossier": "/", "signature": "", "mesures": null
+            }),
+        )
     }
 }
 
@@ -663,4 +709,137 @@ fn nom_de_session_claude_ou_codex() {
     assert!(s.lines().any(|l| l.contains("[—]") && l.contains("fichier illisible")), "{s}");
     assert!(s.lines().any(|l| l.contains("[—]") && l.contains("fichier absent")), "{s}");
     assert!(s.contains("[Codex 019a2b3c]"), "{s}");
+}
+
+#[test]
+fn multiplexage_par_id_et_ancien_mode() {
+    let o = Orchestre::demarrer("multiplexage");
+    o.creer("occupant", "windows", 12 * 1024);
+    let (_, t) = o.creer("patient", "windows", 8 * 1024);
+    let id = t["id"].as_u64().unwrap();
+    let mut l = Ligne::ouvrir(&o);
+    let debut = Instant::now();
+    let parametres = json!({ "connu": cle(&t["raison"]), "delai_s": "2" });
+    l.envoyer(json!({ "id": 2, "methode": "GET", "chemin": format!("/tickets/{id}/attente"), "parametres": parametres }));
+    l.envoyer(json!({ "id": 3, "methode": "GET", "chemin": "/etat" }));
+    let a = l.lire();
+    assert_eq!(a["id"], 3, "l'état répond pendant l'attente : {a}");
+    assert!(debut.elapsed() < Duration::from_millis(1500));
+    let b = l.lire();
+    assert_eq!((b["id"].as_u64(), b["code"].as_u64()), (Some(2), Some(200)), "{b}");
+    assert!(debut.elapsed() >= Duration::from_millis(1500), "l'attente a bien duré");
+    // Sans id : séquentiel, réponse sans id.
+    let c = l.appel("GET", "/etat", Value::Null);
+    assert!(c.get("id").is_none() && c["code"] == 200, "{c}");
+}
+
+/// Clé stable d'une raison telle que la calcule `Raison::cle`.
+fn cle(raison: &Value) -> String {
+    let r: commun::modele::Raison = serde_json::from_value(raison.clone()).unwrap();
+    r.cle()
+}
+
+#[test]
+fn relais_bidirectionnel() {
+    let o = Orchestre::demarrer("relais-bidir");
+    o.creer("occupant", "windows", 12 * 1024);
+    let (_, t) = o.creer("patient", "windows", 8 * 1024);
+    let id = t["id"].as_u64().unwrap();
+    let mut relais = Command::new(env!("CARGO_BIN_EXE_orchestrateur"))
+        .args(["relais", "--tube", &o.tube])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut entree = relais.stdin.take().unwrap();
+    let mut sortie = BufReader::new(relais.stdout.take().unwrap());
+    let connu = cle(&t["raison"]);
+    let attente = json!({ "id": 1, "methode": "GET", "chemin": format!("/tickets/{id}/attente"), "parametres": { "connu": connu, "delai_s": "2" } });
+    writeln!(entree, "{attente}").unwrap();
+    writeln!(entree, "{}", json!({ "id": 2, "methode": "GET", "chemin": "/etat" })).unwrap();
+    let mut lire = || {
+        let mut ligne = String::new();
+        sortie.read_line(&mut ligne).unwrap();
+        serde_json::from_str::<Value>(&ligne).unwrap()
+    };
+    assert_eq!(lire()["id"], 2, "la réponse rapide passe devant l'attente en cours");
+    assert_eq!(lire()["id"], 1);
+    // Fin de stdin avec une requête `id` en cours : sortie sans l'attendre (un client multiplexé qui part).
+    writeln!(entree, "{attente}").unwrap();
+    drop(entree);
+    let debut = Instant::now();
+    assert!(attendre(Duration::from_secs(1), || matches!(relais.try_wait(), Ok(Some(_)))), "fin de stdin : le relais sort");
+    assert!(debut.elapsed() < Duration::from_secs(1));
+    assert_eq!(relais.wait().unwrap().code(), Some(0));
+
+    // `echo requête | relais` : la réponse d'une requête sans `id` est rendue avant la sortie.
+    let sortie = Command::new(env!("CARGO_BIN_EXE_orchestrateur"))
+        .args(["relais", "--tube", &o.tube])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut r| {
+            let attente = json!({ "methode": "GET", "chemin": format!("/tickets/{id}/attente"), "parametres": { "connu": cle(&t["raison"]), "delai_s": "1" } });
+            writeln!(r.stdin.take().unwrap(), "{attente}\n{}", json!({ "methode": "GET", "chemin": "/etat" }))?;
+            r.wait_with_output()
+        })
+        .unwrap();
+    let lignes: Vec<Value> = texte(&sortie.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lignes.len(), 2, "{lignes:?}");
+    assert_eq!(sortie.status.code(), Some(0));
+}
+
+#[test]
+fn liaison_perdue_puis_reprise_par_la_meme_session() {
+    let o = Orchestre::demarrer("liaison");
+    let mut a = Ligne::ouvrir(&o);
+    let lien = a.lier("session-A");
+    assert_eq!((lien["code"].as_u64(), lien["corps"]["liaison"].as_u64()), (Some(200), Some(1)), "{lien}");
+    assert_eq!(a.lier("session-A")["code"], 409, "une seule liaison par connexion");
+    assert_eq!(a.appel("POST", "/liaison/battement", json!({}))["code"], 200);
+    let actif = a.creer("lie-actif", 4 * 1024);
+    let attente = a.creer("lie-attente", 14 * 1024);
+    assert_eq!((actif["corps"]["etat"].as_str(), attente["corps"]["etat"].as_str()), (Some("actif"), Some("attente")));
+    let (n1, n2) = (actif["corps"]["id"].as_u64().unwrap(), attente["corps"]["id"].as_u64().unwrap());
+
+    drop(a);
+    assert!(attendre(Duration::from_secs(3), || o.etat_ticket(n1).as_deref() == Some("orphelin")), "{}", o.journal());
+    assert!(o.journal().contains("LIAISON #1 fermée"), "{}", o.journal());
+    let phrase = o.ticket(n1).unwrap()["phrase"].as_str().unwrap().to_owned();
+    assert!(phrase.contains("liaison de sa session perdue"), "{phrase}");
+    // Pas de gel : un autre client passe.
+    let (_, autre) = o.creer("autre", "windows", 1024);
+    assert_eq!(autre["etat"], "actif", "{autre}");
+    o.appel("POST", &format!("/tickets/{}/fin", autre["id"]), json!({}));
+
+    // Une autre session ne reprend rien ; la même, si.
+    let mut b = Ligne::ouvrir(&o);
+    assert_eq!(b.lier("session-B")["corps"]["repris"], json!([]));
+    let mut c = Ligne::ouvrir(&o);
+    assert_eq!(c.lier("session-A")["corps"]["repris"], json!([n1, n2]));
+    assert_eq!(o.etat_ticket(n1).as_deref(), Some("actif"));
+    assert!(o.journal().contains(&format!("reprise de #{n1}, #{n2}")), "{}", o.journal());
+
+    // Sans reprise dans delai.reprise (3 s) : retirés.
+    drop(c);
+    assert!(attendre(Duration::from_secs(8), || o.ticket(n1).is_none() && o.ticket(n2).is_none()), "{}", o.journal());
+    assert!(o.journal().contains(&format!("Ticket #{n1} retiré : liaison de sa session perdue")), "{}", o.journal());
+    drop(b);
+}
+
+#[test]
+fn reprise_de_liaison_apres_redemarrage() {
+    let mut o = Orchestre::demarrer("liaison-redemarrage");
+    let mut a = Ligne::ouvrir(&o);
+    a.lier("session-R");
+    let n = a.creer("survivant", 2048)["corps"]["id"].as_u64().unwrap();
+    o.tuer();
+    drop(a);
+    o.lancer();
+    assert_eq!(o.etat_ticket(n).as_deref(), Some("orphelin"));
+    let mut b = Ligne::ouvrir(&o);
+    assert_eq!(b.lier("session-R")["corps"]["repris"], json!([n]));
+    assert_eq!(o.etat_ticket(n).as_deref(), Some("actif"));
+    assert_eq!(Ligne::ouvrir(&o).appel("POST", "/liaison/battement", json!({}))["code"], 409, "battement sans liaison");
 }

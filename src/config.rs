@@ -20,6 +20,7 @@ pub struct Config {
     pub delai_rappel_s: u64,
     pub delai_actif_s: u64,
     pub delai_montee_s: u64,
+    pub delai_reprise_s: u64,
     pub long_poll_s: u64,
     pub max_doublages: u32,
     pub attente_max_tete_s: u64,
@@ -45,6 +46,7 @@ impl Default for Config {
             delai_rappel_s: 120,
             delai_actif_s: 60,
             delai_montee_s: 180,
+            delai_reprise_s: 120,
             long_poll_s: 60,
             max_doublages: 3,
             attente_max_tete_s: 20 * 60,
@@ -89,6 +91,9 @@ delai.long_poll = "60s"
 # Montée en charge d'un actif : réservation entière pendant ce délai, puis seulement ce qu'il n'a pas encore pris
 # (sa consommation est alors dans les mesures).
 delai.montee = "3m"
+# Liaison d'une session (serveur MCP) fermée : ses tickets attendent une reprise par la même session pendant ce délai,
+# puis sont retirés (en attente) ou libérés (actifs).
+delai.reprise = "2m"
 
 # Remplissage : un ticket passe devant la tête bloquée s'il n'utilise pas ce qui lui manque ou finit avant
 # son démarrage estimé ; au plus ce nombre de fois, et plus du tout après cette attente de la tête.
@@ -140,6 +145,7 @@ impl Config {
                 "delai.attente" => c.delai_attente_s = secondes()?,
                 "delai.absence" => c.delai_absence_s = secondes()?,
                 "delai.rappel" => c.delai_rappel_s = secondes()?,
+                "delai.reprise" => c.delai_reprise_s = secondes()?,
                 "delai.actif" => c.delai_actif_s = secondes()?,
                 "delai.montee" => c.delai_montee_s = secondes()?,
                 "delai.long_poll" => c.long_poll_s = secondes()?,

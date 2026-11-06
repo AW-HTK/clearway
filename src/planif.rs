@@ -304,6 +304,7 @@ pub fn refus(cote: Cote, b: &Besoin, m: &Mesures, c: &Config) -> Option<Raison> 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Liberation {
     WslArrete,
+    SessionFermee,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,6 +420,9 @@ fn liste(ids: &[u64]) -> String {
 fn levee_orphelin(t: &Ticket) -> String {
     let id = t.id;
     match t.cause_orphelin {
+        Some(CauseOrphelin::Connexion) => {
+            format!("reprise par la même session, « charge fin {id} », « charge annule {id} » ou « Libérer » dans la fenêtre")
+        }
         Some(CauseOrphelin::Bail) => format!(
             "« charge fin {id} », « charge prolonge {id} <durée> \"<raison>\" », « charge annule {id} » ou « Libérer » dans la fenêtre"
         ),
@@ -428,6 +432,10 @@ fn levee_orphelin(t: &Ticket) -> String {
 
 fn cause_orphelin(t: &Ticket, maintenant: u64) -> String {
     match t.cause_orphelin {
+        Some(CauseOrphelin::Connexion) => format!(
+            "liaison de sa session perdue depuis {} (session fermée ou serveur MCP relancé)",
+            duree(maintenant.saturating_sub(t.perdu.unwrap_or(maintenant)))
+        ),
         Some(CauseOrphelin::Bail) => format!(
             "bail échu depuis {} (durée déclarée de {} dépassée), sans nouvelle de la session depuis {}",
             duree(t.fin_prevue().map_or(0, |f| maintenant.saturating_sub(f))),
@@ -464,6 +472,15 @@ pub fn planifier(etat: &Etat, m: &Mesures, c: &Config, maintenant: u64) -> Plan 
     e.vmmem_pid = pid;
 
     for t in &mut e.tickets {
+        if let Some(depuis) = t.perdu {
+            if maintenant.saturating_sub(depuis) >= c.delai_reprise_s {
+                evenements.push(Evenement::Libere(t.id, Liberation::SessionFermee));
+            } else if t.etat == EtatTicket::Actif {
+                t.etat = EtatTicket::Orphelin;
+                t.cause_orphelin = Some(CauseOrphelin::Connexion);
+            }
+            continue;
+        }
         let silence = maintenant.saturating_sub(vu(t));
         let rappel_du = !t.recu && t.accorde.is_some_and(|a| maintenant.saturating_sub(a) >= c.delai_rappel_s);
         match t.etat {
@@ -496,7 +513,10 @@ pub fn planifier(etat: &Etat, m: &Mesures, c: &Config, maintenant: u64) -> Plan 
             _ => {}
         }
     }
-    e.tickets.retain(|t| !evenements.contains(&Evenement::Expire(t.id)));
+    e.tickets.retain(|t| {
+        !evenements.contains(&Evenement::Expire(t.id))
+            && !evenements.contains(&Evenement::Libere(t.id, Liberation::SessionFermee))
+    });
 
     mettre_a_jour_pression_swap(&mut e, m, c, maintenant);
     let mut niv = niveaux(&e, m, c, maintenant);
@@ -529,7 +549,12 @@ pub fn planifier(etat: &Etat, m: &Mesures, c: &Config, maintenant: u64) -> Plan 
             });
         }
     }
-    for t in e.tickets.iter().filter(|t| t.etat == EtatTicket::Orphelin) {
+    // Une liaison perdue n'est pas une commande sans surveillance : réservation gardée, sans gel, le temps de la reprise.
+    for t in e
+        .tickets
+        .iter()
+        .filter(|t| t.etat == EtatTicket::Orphelin && t.cause_orphelin != Some(CauseOrphelin::Connexion))
+    {
         for r in RESERVES {
             if r.besoin(t.cote, &t.besoin) > 0 && gels[r.i()].is_none() {
                 gels[r.i()] = Some(Gel {
@@ -553,17 +578,18 @@ pub fn planifier(etat: &Etat, m: &Mesures, c: &Config, maintenant: u64) -> Plan 
     for id in en_attente {
         let t = e.ticket(id).expect("ticket en attente présent").clone();
         let silence = maintenant.saturating_sub(vu(&t));
-        if t.rappel.is_some() || (t.ecoutes == 0 && silence > c.delai_attente_s) {
+        if t.perdu.is_some() || t.rappel.is_some() || (t.ecoutes == 0 && silence > c.delai_attente_s) {
             position += 1;
-            let pourquoi = match t.rappel {
-                Some(r) => format!("feu vert rappelé à {} faute d'avoir été utilisé", hhmm(r)),
-                None => format!("aucun client ne l'attend depuis {}", duree(silence)),
+            let pourquoi = match (t.perdu, t.rappel) {
+                (Some(p), _) => format!("liaison de sa session perdue à {}, en attente de reprise", hhmm(p)),
+                (None, Some(r)) => format!("feu vert rappelé à {} faute d'avoir été utilisé", hhmm(r)),
+                (None, None) => format!("aucun client ne l'attend depuis {}", duree(silence)),
             };
             let mut r = Raison::simple(
                 TypeDecision::Attente,
                 format!(
                     "#{id} en attente, position {position} : {pourquoi} ; place gardée jusqu'à {}, les suivants passent. Relance « charge attend {id} ».",
-                    hhmm(vu(&t) + c.delai_absence_s)
+                    hhmm(t.perdu.map_or(vu(&t) + c.delai_absence_s, |p| p + c.delai_reprise_s))
                 ),
             );
             r.position = Some(position);
@@ -791,6 +817,20 @@ pub fn planifier(etat: &Etat, m: &Mesures, c: &Config, maintenant: u64) -> Plan 
                         format!("#{} actif{force} depuis {}, fin prévue vers {}.{montee}{suite}", t.id, hhmm(accorde), hhmm(fin)),
                     ),
                 );
+            }
+            EtatTicket::Orphelin if t.cause_orphelin == Some(CauseOrphelin::Connexion) => {
+                let mut raison = Raison::simple(
+                    TypeDecision::Orphelin,
+                    format!(
+                        "#{} orphelin : {}. Réservation gardée sans geler la file ; libéré à {} sans reprise. Levée : {}.",
+                        t.id,
+                        cause_orphelin(t, maintenant),
+                        hhmm(t.perdu.unwrap_or(maintenant) + c.delai_reprise_s),
+                        levee_orphelin(t)
+                    ),
+                );
+                raison.bloquants = vec![t.id];
+                raisons.insert(t.id, raison);
             }
             EtatTicket::Orphelin => {
                 let gelees: Vec<&str> = RESERVES
