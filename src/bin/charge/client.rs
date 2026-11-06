@@ -371,6 +371,7 @@ impl Client {
         req.parametres = BTreeMap::from([
             ("connu".into(), connu.to_owned()),
             ("delai_s".into(), plafond.as_secs().max(1).to_string()),
+            ("accuse".into(), "1".into()),
         ]);
         ajouter_mesures(&mut req);
         self.appeler(&req, plafond + MARGE_ATTENTE)
@@ -634,6 +635,7 @@ fn demande_de(o: &Options, session: String, description: String, manuel: bool) -
         rattachement,
         projet: Some(projet),
         branche,
+        accuse: !manuel,
     }
 }
 
@@ -735,6 +737,18 @@ fn attendre(c: &mut Client, id: u64, connu: &mut String, max_s: u64, ecrire: &dy
     }
 }
 
+/// Confirme que le feu vert a bien été transmis ; `Ok(false)` si l'orchestrateur l'a repris entre-temps.
+fn accuser(c: &mut Client, id: u64) -> Result<bool, String> {
+    let r = c.demander("POST", &format!("/tickets/{id}/recu"), Value::Null)?;
+    match r.code {
+        200 => Ok(true),
+        409 => Ok(false),
+        // Orchestrateur d'avant l'accusé : la réponse envoyée valait déjà remise.
+        404 if r.corps["erreur"] == "route inconnue" => Ok(true),
+        code => Err(format!("accusé du #{id} ({code}) : {}", phrase(&r.corps))),
+    }
+}
+
 fn attend(args: &[String]) -> Result<i32, String> {
     let id = numero(args)?;
     let o = options(&args[1..], false)?;
@@ -742,13 +756,26 @@ fn attend(args: &[String]) -> Result<i32, String> {
     let mut c = Client::nouveau()?;
     let mut connu = String::new();
     let ecrire = |p: &str| {
-        println!("{p}");
-        let _ = std::io::stdout().flush();
+        let mut sortie = std::io::stdout();
+        let _ = writeln!(sortie, "{p}").and_then(|_| sortie.flush());
     };
     match attendre(&mut c, id, &mut connu, o.max_s, &ecrire) {
         Ok(FinAttente::FeuVert) => {
-            println!("FEU VERT pour le ticket #{id} : lance ta tâche lourde maintenant, puis « charge fin {id} ».");
-            Ok(0)
+            let mut sortie = std::io::stdout();
+            writeln!(sortie, "FEU VERT pour le ticket #{id} : lance ta tâche lourde maintenant, puis « charge fin {id} ».")
+                .and_then(|_| sortie.flush())
+                .map_err(|e| format!("feu vert du #{id} non transmis ({e}) : sans accusé, l'orchestrateur le reprendra."))?;
+            match accuser(&mut c, id) {
+                Ok(true) => Ok(0),
+                Ok(false) => {
+                    println!("Feu vert du #{id} repris par l'orchestrateur avant l'accusé : ne lance rien, relance « charge attend {id} ».");
+                    Ok(CODE_ENCORE)
+                }
+                Err(e) if e == INTERROMPU => Ok(130),
+                Err(e) => Err(format!(
+                    "{e} ; feu vert non confirmé : relance « charge attend {id} » avant de lancer la tâche lourde."
+                )),
+            }
         }
         Ok(FinAttente::Sorti(p)) => {
             println!("Ticket #{id} hors de la file : {p}");
@@ -881,7 +908,7 @@ fn statut() -> Result<i32, String> {
             _ => String::new(),
         };
         println!(
-            "#{:<4} {:<8} {:<7} {:>7} {:>9} {:>8}  depuis {}  [{}]{lieu} : {}{}",
+            "#{:<4} {:<8} {:<7} {:>7} {:>9} {:>8}  depuis {}  [{}]{lieu} : {}{}{}",
             t.id,
             format!("{:?}", t.etat).to_lowercase(),
             t.cote.nom(),
@@ -896,7 +923,8 @@ fn statut() -> Result<i32, String> {
                 (true, false) => " (forcé)",
                 (false, true) => " (manuel)",
                 (false, false) => "",
-            }
+            },
+            if t.bail_depasse { " (bail dépassé)" } else { "" }
         );
         println!("      {}", t.phrase);
     }
@@ -936,28 +964,47 @@ fn run(args: &[String]) -> Result<i32, String> {
     } else {
         eprintln!("charge : ticket #{id} · {}", v.raison.phrase);
     }
-    if v.etat == "attente" {
-        let mut connu = v.raison.cle();
-        let ecrire = |p: &str| eprintln!("charge : {p}");
-        match attendre(&mut c, id, &mut connu, o.max_s, &ecrire) {
-            Ok(FinAttente::FeuVert) => {}
-            Ok(FinAttente::Sorti(p)) => {
-                eprintln!("charge : ticket #{id} retiré : {p}");
-                return Ok(1);
+    let mut en_attente = v.etat == "attente";
+    let mut connu = v.raison.cle();
+    loop {
+        if en_attente {
+            let ecrire = |p: &str| eprintln!("charge : {p}");
+            match attendre(&mut c, id, &mut connu, o.max_s, &ecrire) {
+                Ok(FinAttente::FeuVert) => {}
+                Ok(FinAttente::Sorti(p)) => {
+                    eprintln!("charge : ticket #{id} retiré : {p}");
+                    return Ok(1);
+                }
+                Ok(FinAttente::Encore(p)) => {
+                    eprintln!(
+                        "charge : toujours en attente après {} : {p} Relance la même commande pour reprendre le ticket #{id} sans perdre ta place.",
+                        duree(o.max_s)
+                    );
+                    return Ok(CODE_ENCORE);
+                }
+                Err(e) if e == INTERROMPU => {
+                    let _ = c.copie().demander("DELETE", &format!("/tickets/{id}"), Value::Null);
+                    eprintln!("charge : interrompu, ticket #{id} annulé.");
+                    return Ok(130);
+                }
+                Err(e) => return Err(e),
             }
-            Ok(FinAttente::Encore(p)) => {
-                eprintln!(
-                    "charge : toujours en attente après {} : {p} Relance la même commande pour reprendre le ticket #{id} sans perdre ta place.",
-                    duree(o.max_s)
-                );
-                return Ok(CODE_ENCORE);
+        }
+        match accuser(&mut c, id) {
+            Ok(true) => break,
+            Ok(false) => {
+                eprintln!("charge : feu vert #{id} repris avant l'accusé ; attente reprise.");
+                en_attente = true;
             }
             Err(e) if e == INTERROMPU => {
                 let _ = c.copie().demander("DELETE", &format!("/tickets/{id}"), Value::Null);
                 eprintln!("charge : interrompu, ticket #{id} annulé.");
                 return Ok(130);
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                eprintln!("charge : {e} ; le signal de présence le confirmera.");
+                break;
+            }
         }
     }
     executer_accorde(&mut c, id, &o.commande)

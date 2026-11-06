@@ -328,6 +328,11 @@ impl Serveur {
                     self.journal(&format!("EXPIRÉ #{id} {quoi} · {phrase}"));
                     self.terminer(id, "expire", phrase);
                 }
+                Evenement::BailDepasse(id) => {
+                    let quoi = self.etat.ticket(id).map(resume).unwrap_or_default();
+                    let phrase = self.raisons.get(&id).map(|r| r.phrase.clone()).unwrap_or_default();
+                    self.journal(&format!("BAIL DÉPASSÉ #{id} {quoi} · {phrase}"));
+                }
                 Evenement::Orphelin(id) | Evenement::Bail(id) => {
                     let quoi = self.etat.ticket(id).map(resume).unwrap_or_default();
                     let phrase = self.raisons.get(&id).map(|r| r.phrase.clone()).unwrap_or_default();
@@ -444,6 +449,7 @@ impl Serveur {
                     accorde: t.accorde,
                     manuel: t.manuel,
                     force: t.force,
+                    bail_depasse: t.bail_depasse && t.etat == EtatTicket::Actif,
                     presence_il_y_a_s: now.saturating_sub(t.presence),
                     phrase: self.raisons.get(&t.id).map(|r| r.phrase.clone()).unwrap_or_default(),
                 })
@@ -676,6 +682,7 @@ pub fn traiter(p: &Partage, req: &Requete, vivant: &dyn Fn() -> bool) -> Reponse
     match (req.methode.as_str(), segments.as_slice()) {
         ("POST", ["tickets"]) => creer(p, req),
         ("GET", ["tickets", n, "attente"]) => id(n).map_or_else(invalide, |i| attendre(p, req, i, vivant)),
+        ("POST", ["tickets", n, "recu"]) => id(n).map_or_else(invalide, |i| accuser(p, i)),
         ("POST", ["tickets", n, "presence"]) => id(n).map_or_else(invalide, |i| presence(p, req, i)),
         ("POST", ["tickets", n, "prolonge"]) => id(n).map_or_else(invalide, |i| prolonger(p, req, i)),
         ("POST", ["tickets", n, "fin"]) => id(n).map_or_else(invalide, |i| {
@@ -709,6 +716,7 @@ fn creer(p: &Partage, req: &Requete) -> Reponse {
     let now = maintenant();
     let mut s = p.verrou();
     s.maj_wsl(d.mesures, now);
+    let remis = |id: u64| (!d.accuse).then_some(id);
     if let Some(id) = s.etat.tickets.iter().find(|t| t.requete_id == d.requete_id).map(|t| t.id) {
         return reponse(200, en_json(&s.vue(id)));
     }
@@ -728,7 +736,7 @@ fn creer(p: &Partage, req: &Requete) -> Reponse {
             t.rappel = None;
             t.presence = now;
         }
-        let rep = match s.valider(candidat, true, Some(id), Some(format!("RATTACHÉ #{id} : la même commande reprend son ticket."))) {
+        let rep = match s.valider(candidat, true, remis(id), Some(format!("RATTACHÉ #{id} : la même commande reprend son ticket."))) {
             Ok(()) => reponse(200, en_json(&s.vue(id))),
             Err(e) => erreur(503, &e),
         };
@@ -769,6 +777,7 @@ fn creer(p: &Partage, req: &Requete) -> Reponse {
         dispo_accord_mo: None,
         manuel: d.manuel,
         recu: false,
+        bail_depasse: false,
         rappel: None,
         cause_orphelin: None,
         rattachement: d.rattachement,
@@ -784,7 +793,7 @@ fn creer(p: &Partage, req: &Requete) -> Reponse {
     };
     let prelude = format!("DEMANDE #{id} {}", resume(&t));
     candidat.tickets.push(t);
-    let rep = match s.valider(candidat, true, Some(id), Some(prelude)) {
+    let rep = match s.valider(candidat, true, remis(id), Some(prelude)) {
         Ok(()) => reponse(201, en_json(&s.vue(id))),
         Err(e) => erreur(503, &e),
     };
@@ -794,6 +803,8 @@ fn creer(p: &Partage, req: &Requete) -> Reponse {
 
 fn attendre(p: &Partage, req: &Requete, id: u64, vivant: &dyn Fn() -> bool) -> Reponse {
     let connu = req.parametre("connu").unwrap_or("").to_owned();
+    // Un client qui accuse réception confirme par `/recu` ; sinon, la réponse envoyée vaut remise.
+    let accuse = req.parametre("accuse") == Some("1");
     let mut s = p.verrou();
     s.maj_wsl(wsl_depuis_parametres(req), maintenant());
     let plafond = req.parametre("delai_s").and_then(|d| d.parse::<u64>().ok()).unwrap_or(u64::MAX);
@@ -834,7 +845,7 @@ fn attendre(p: &Partage, req: &Requete, id: u64, vivant: &dyn Fn() -> bool) -> R
     let rep = match vue {
         Some(v) if v.raison.decision == TypeDecision::Termine => reponse(404, en_json(&v)),
         Some(v) => {
-            if v.etat == "actif" {
+            if v.etat == "actif" && !accuse {
                 let candidat = s.etat.clone();
                 let _ = s.valider(candidat, false, Some(id), None);
             }
@@ -875,6 +886,37 @@ fn presence(p: &Partage, req: &Requete, id: u64) -> Reponse {
     rep
 }
 
+fn accuser(p: &Partage, id: u64) -> Reponse {
+    let mut s = p.verrou();
+    let Some(t) = s.etat.ticket_mut(id) else {
+        return introuvable(&s, id);
+    };
+    t.presence = maintenant();
+    let (etat, recu) = (t.etat, t.recu);
+    let rep = match etat {
+        EtatTicket::Attente => {
+            let phrase = format!(
+                "Ticket #{id} : feu vert repris avant l'accusé, le ticket attend de nouveau. Relance « charge attend {id} »."
+            );
+            erreur(409, &phrase)
+        }
+        EtatTicket::Actif if !recu => {
+            let mut candidat = s.etat.clone();
+            if let Some(c) = candidat.ticket_mut(id) {
+                c.recu = true;
+            }
+            let prelude = format!("ACCUSÉ #{id} : feu vert reçu par le client.");
+            match s.valider(candidat, true, None, Some(prelude)) {
+                Ok(()) => reponse(200, json!({ "id": id, "etat": "actif", "phrase": format!("Feu vert du #{id} accusé.") })),
+                Err(e) => erreur(503, &e),
+            }
+        }
+        _ => reponse(200, json!({ "id": id, "etat": nom_etat(etat), "phrase": format!("Feu vert du #{id} déjà accusé.") })),
+    };
+    p.publier(s);
+    rep
+}
+
 fn prolonger(p: &Partage, req: &Requete, id: u64) -> Reponse {
     let d: Prolonge = match serde_json::from_value(req.corps.clone()) {
         Ok(d) => d,
@@ -895,6 +937,7 @@ fn prolonger(p: &Partage, req: &Requete, id: u64) -> Reponse {
         c.etat = EtatTicket::Actif;
         c.cause_orphelin = None;
         c.recu = true;
+        c.bail_depasse = false;
         c.presence = now;
     }
     let phrase = format!("Ticket #{id} prolongé de {} : fin prévue vers {}.", duree(d.duree_s), hhmm(fin));

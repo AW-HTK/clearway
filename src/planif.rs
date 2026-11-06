@@ -309,6 +309,7 @@ pub enum Evenement {
     FeuVert(u64),
     Expire(u64),
     Orphelin(u64),
+    BailDepasse(u64),
     Bail(u64),
     Rappel(u64),
     Libere(u64, Liberation),
@@ -399,6 +400,7 @@ fn accorder(
     tm.base_ram_wsl_mo = Some(niv[Reserve::RamWsl.i()].disponible);
     tm.base_vmmem_mo = m.vmmem.map(|v| v.rss_mo);
     tm.recu = false;
+    tm.bail_depasse = false;
     tm.cause_orphelin = None;
     libres.join(", ")
 }
@@ -425,12 +427,18 @@ fn levee_orphelin(t: &Ticket) -> String {
 fn cause_orphelin(t: &Ticket, maintenant: u64) -> String {
     match t.cause_orphelin {
         Some(CauseOrphelin::Bail) => format!(
-            "bail échu depuis {} (durée déclarée de {} dépassée)",
+            "bail échu depuis {} (durée déclarée de {} dépassée), sans nouvelle de la session depuis {}",
             duree(t.fin_prevue().map_or(0, |f| maintenant.saturating_sub(f))),
-            duree(t.besoin.duree_s)
+            duree(t.besoin.duree_s),
+            duree(maintenant.saturating_sub(derniere_nouvelle(t)))
         ),
         _ => format!("sans signal depuis {}", duree(maintenant.saturating_sub(t.presence))),
     }
+}
+
+/// Dernier signe d'un ticket manuel au-delà de son bail : l'échéance elle-même, ou un signal plus récent.
+fn derniere_nouvelle(t: &Ticket) -> u64 {
+    t.fin_prevue().unwrap_or(0).max(t.presence)
 }
 
 /// Moment depuis lequel un ticket en attente n'a plus de client : dernière présence ou rappel du feu vert.
@@ -468,9 +476,15 @@ pub fn planifier(etat: &Etat, m: &Mesures, c: &Config, maintenant: u64) -> Plan 
                 evenements.push(Evenement::Rappel(t.id));
             }
             EtatTicket::Actif if t.manuel && t.fin_prevue().is_some_and(|f| maintenant >= f) => {
-                t.etat = EtatTicket::Orphelin;
-                t.cause_orphelin = Some(CauseOrphelin::Bail);
-                evenements.push(Evenement::Bail(t.id));
+                if !t.bail_depasse {
+                    t.bail_depasse = true;
+                    evenements.push(Evenement::BailDepasse(t.id));
+                }
+                if maintenant.saturating_sub(derniere_nouvelle(t)) >= c.delai_absence_s {
+                    t.etat = EtatTicket::Orphelin;
+                    t.cause_orphelin = Some(CauseOrphelin::Bail);
+                    evenements.push(Evenement::Bail(t.id));
+                }
             }
             EtatTicket::Actif if !t.manuel && t.recu && silence > c.delai_actif_s => {
                 t.etat = EtatTicket::Orphelin;
@@ -734,11 +748,26 @@ pub fn planifier(etat: &Etat, m: &Mesures, c: &Config, maintenant: u64) -> Plan 
                 let fin = t.fin_prevue().unwrap_or(maintenant);
                 let suite = if !t.recu {
                     format!(
-                        " Feu vert pas encore remis : repris à {} si personne ne le prend.",
+                        " Feu vert pas encore accusé par le client : repris à {} sans accusé.",
                         hhmm(accorde + c.delai_rappel_s)
                     )
+                } else if t.manuel && maintenant >= fin {
+                    format!(
+                        " Bail dépassé depuis {} (durée déclarée de {}) : réservation maintenue, la file continue sur les \
+                         ressources restantes. Travail en cours : « charge prolonge {id} <durée> \"<raison>\" » ; terminé : \
+                         « charge fin {id} ». Sans nouvelle, orphelin à {} et admissions gelées.",
+                        duree(maintenant - fin),
+                        duree(t.besoin.duree_s),
+                        hhmm(derniere_nouvelle(t) + c.delai_absence_s),
+                        id = t.id
+                    )
                 } else if t.manuel {
-                    format!(" Bail : orphelin à {} sans « charge fin {} » ni « charge prolonge ».", hhmm(fin), t.id)
+                    format!(
+                        " Bail jusqu'à {} : au-delà, « charge prolonge {id} » ou « charge fin {id} », sinon orphelin à {}.",
+                        hhmm(fin),
+                        hhmm(derniere_nouvelle(t) + c.delai_absence_s),
+                        id = t.id
+                    )
                 } else {
                     String::new()
                 };

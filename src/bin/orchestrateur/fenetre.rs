@@ -356,8 +356,9 @@ fn rafraichir(h: HWND) {
             let ligne = SendMessageW(liste, LVM_INSERTITEMW, 0, &item as *const _ as isize) as i32;
             let depuis = t.accorde.unwrap_or(t.cree);
             let etat = format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 nom_etat(t.etat),
+                if t.bail_depasse { " (bail dépassé)" } else { "" },
                 if t.force { " (forcé)" } else { "" },
                 if t.manuel { " (manuel)" } else { "" }
             );

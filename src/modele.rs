@@ -65,9 +65,12 @@ pub struct Ticket {
     /// Ticket de `charge demande` : pas de superviseur, la durée déclarée sert de bail.
     #[serde(default)]
     pub manuel: bool,
-    /// Le feu vert a été remis à un client (réponse de création, d'attente ou signal de présence).
+    /// Le feu vert a été remis à un client : accusé, signal de présence, ou réponse envoyée à un ancien client sans accusé.
     #[serde(default)]
     pub recu: bool,
+    /// Ticket manuel dont la durée déclarée est échue : il reste actif et réservé, sans geler la file.
+    #[serde(default)]
+    pub bail_depasse: bool,
     /// Feu vert rappelé faute d'avoir été utilisé : la place est gardée, le ticket est sauté jusqu'au retour du client.
     #[serde(default)]
     pub rappel: Option<u64>,
@@ -204,6 +207,9 @@ pub struct Demande {
     pub projet: Option<String>,
     #[serde(default)]
     pub branche: Option<String>,
+    /// Le client confirmera la réception d'un feu vert immédiat par `/tickets/{n}/recu`.
+    #[serde(default)]
+    pub accuse: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -339,6 +345,8 @@ pub struct VueTicket {
     pub manuel: bool,
     #[serde(default)]
     pub force: bool,
+    #[serde(default)]
+    pub bail_depasse: bool,
     #[serde(default)]
     pub projet: Option<String>,
     #[serde(default)]

@@ -66,8 +66,12 @@ impl Orchestre {
     }
 
     fn appel(&self, methode: &str, chemin: &str, corps: Value) -> (u16, Value) {
+        self.appel_avec(methode, chemin, json!({}), corps)
+    }
+
+    fn appel_avec(&self, methode: &str, chemin: &str, parametres: Value, corps: Value) -> (u16, Value) {
         let mut flux = UnixStream::connect(chemin_socket(&self.tube)).unwrap();
-        let req = json!({ "methode": methode, "chemin": chemin, "corps": corps });
+        let req = json!({ "methode": methode, "chemin": chemin, "parametres": parametres, "corps": corps });
         flux.write_all(format!("{req}\n").as_bytes()).unwrap();
         let mut ligne = String::new();
         BufReader::new(&flux).read_line(&mut ligne).unwrap();
@@ -85,6 +89,14 @@ impl Orchestre {
                 "claude_pid": null, "dossier": "/", "signature": "", "mesures": null
             }),
         )
+    }
+
+    fn attente_brute(&self, id: u64, accuse: bool) -> (u16, Value) {
+        let mut parametres = json!({ "connu": "", "delai_s": "2" });
+        if accuse {
+            parametres["accuse"] = json!("1");
+        }
+        self.appel_avec("GET", &format!("/tickets/{id}/attente"), parametres, Value::Null)
     }
 
     fn etat(&self) -> Value {
@@ -218,6 +230,7 @@ fn run_attend_son_tour() {
     assert_eq!(sortie.status.code(), Some(0), "{}", texte(&sortie.stderr));
     assert!(texte(&sortie.stderr).contains("en attente, position 1"), "{}", texte(&sortie.stderr));
     assert_eq!(texte(&sortie.stdout).trim(), "parti");
+    assert!(o.journal().contains("ACCUSÉ #2"), "{}", o.journal());
 }
 
 #[test]
@@ -265,8 +278,56 @@ fn feu_vert_non_remis_rappele_puis_recupere() {
     let a = o.sortie(&["attend", &id.to_string(), "--max", "10s"]);
     assert_eq!(a.status.code(), Some(0), "{}", texte(&a.stdout));
     assert!(texte(&a.stdout).contains("FEU VERT"));
+    assert!(o.journal().contains(&format!("ACCUSÉ #{id}")), "{}", o.journal());
     std::thread::sleep(Duration::from_secs(4));
     assert_eq!(o.etat_ticket(id).as_deref(), Some("actif"), "remis : plus de rappel");
+}
+
+/// Feu vert accordé alors qu'aucun client n'écoute : il attend d'être réclamé.
+fn feu_vert_en_suspens(o: &Orchestre) -> u64 {
+    o.creer("occupant", "windows", 12 * 1024);
+    let (_, t) = o.creer("suivant", "windows", 8 * 1024);
+    assert_eq!(t["etat"], "attente", "{t}");
+    o.appel("POST", "/tickets/1/fin", json!({}));
+    let id = t["id"].as_u64().unwrap();
+    assert_eq!(o.etat_ticket(id).as_deref(), Some("actif"));
+    id
+}
+
+#[test]
+fn accuse_du_feu_vert() {
+    let reclamer = |nom: &str, accuse: bool| {
+        let o = Orchestre::demarrer(nom);
+        let id = feu_vert_en_suspens(&o);
+        let (code, v) = o.attente_brute(id, accuse);
+        assert_eq!((code, v["etat"].as_str()), (200, Some("actif")), "{v}");
+        (o, id)
+    };
+    let (ancien, id_ancien) = reclamer("accuse-ancien", false);
+    let (sans, id_sans) = reclamer("accuse-sans", true);
+    let (avec, id_avec) = reclamer("accuse-avec", true);
+    let ids = [id_ancien, id_sans, id_avec];
+    let (code, r) = avec.appel("POST", &format!("/tickets/{}/recu", ids[2]), Value::Null);
+    assert_eq!(code, 200, "{r}");
+    assert!(avec.journal().contains(&format!("ACCUSÉ #{}", ids[2])), "{}", avec.journal());
+    let (code, _) = avec.appel("POST", "/tickets/999/recu", Value::Null);
+    assert_eq!(code, 404);
+
+    // Feu vert envoyé, jamais accusé dans delai.rappel (3 s) : repris, place gardée.
+    assert!(attendre(Duration::from_secs(8), || sans.etat_ticket(ids[1]).as_deref() == Some("attente")));
+    assert!(sans.journal().contains(&format!("RAPPEL #{}", ids[1])), "{}", sans.journal());
+    let (code, r) = sans.appel("POST", &format!("/tickets/{}/recu", ids[1]), Value::Null);
+    assert_eq!(code, 409, "{r}");
+    assert!(r["erreur"].as_str().unwrap().contains("charge attend"), "{r}");
+
+    // L'ancien client (réponse = remise) et l'accusé gardent leur feu vert ; sans signal de présence, ils
+    // finissent orphelins, ce qui suppose un feu vert remis.
+    std::thread::sleep(Duration::from_secs(2));
+    for (o, id) in [(&ancien, ids[0]), (&avec, ids[2])] {
+        let etat = o.etat_ticket(id);
+        assert!(matches!(etat.as_deref(), Some("actif" | "orphelin")), "{etat:?}");
+        assert!(!o.journal().contains(&format!("RAPPEL #{id}")), "{}", o.journal());
+    }
 }
 
 #[test]
@@ -274,7 +335,21 @@ fn bail_manuel_puis_prolongation() {
     let o = Orchestre::demarrer("bail");
     let d = o.sortie(&["demande", "--cote", "windows", "--ram", "1G", "--duree", "2s", "court"]);
     let id = texte(&d.stdout).trim().to_owned();
-    assert!(attendre(Duration::from_secs(8), || o.etat_ticket(id.parse().unwrap()).as_deref() == Some("orphelin")));
+    let n: u64 = id.parse().unwrap();
+
+    // Bail dépassé : toujours actif et réservé, la file continue.
+    assert!(attendre(Duration::from_secs(8), || o.journal().contains(&format!("BAIL DÉPASSÉ #{id}"))), "{}", o.journal());
+    let t = o.ticket(n).unwrap();
+    assert_eq!((t["etat"].as_str(), &t["bail_depasse"]), (Some("actif"), &json!(true)), "{t}");
+    assert!(t["phrase"].as_str().unwrap().contains(&format!("charge prolonge {id}")), "{t}");
+    let (_, pendant) = o.creer("pendant", "windows", 1024);
+    assert_eq!(pendant["etat"], "actif", "{pendant}");
+    o.appel("POST", &format!("/tickets/{}/fin", pendant["id"]), json!({}));
+    let s = texte(&o.sortie(&["statut"]).stdout);
+    assert!(s.contains("(bail dépassé)"), "{s}");
+
+    // Sans nouvelle pendant delai.absence (8 s) après l'échéance : orphelin, admissions gelées.
+    assert!(attendre(Duration::from_secs(14), || o.etat_ticket(n).as_deref() == Some("orphelin")));
     assert!(o.journal().contains(&format!("BAIL ÉCHU #{id}")), "{}", o.journal());
     let (_, b) = o.creer("suivant", "windows", 1024);
     assert_eq!(b["raison"]["decision"], "gel");

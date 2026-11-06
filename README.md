@@ -34,7 +34,9 @@ cargo test -j 4    # unitaires + intégration (serveur en version Linux sur sock
 - Client : `CHARGE_EXE`, `CHARGE_TUBE`, `CHARGE_DOSSIER` (pour le lancement automatique),
   `CHARGE_ARGS_LANCEMENT`, `CHARGE_SESSION`.
 - Codes de `charge` : 0, 1 ticket sorti de la file, 2 erreur, 3 refus, 75 toujours en attente après `--max`
-  (relancer la même commande garde la place), 130 interrompu.
+  ou feu vert repris avant l'accusé (relancer la même commande garde la place), 130 interrompu.
+- Accusé de feu vert : `charge attend` et `charge run` envoient `accuse=1`, puis `POST /tickets/<n>/recu` une
+  fois le feu vert transmis ; sans accusé dans `delai.rappel`, le feu vert est repris.
 
 ## Essais sous Windows réel (instance de test, rien à l'écran)
 

@@ -60,6 +60,7 @@ fn ticket(id: u64, cote: Cote, ram_go: f64, cpu: u32, duree_min: u64) -> Ticket 
         dispo_accord_mo: None,
         manuel: false,
         recu: false,
+        bail_depasse: false,
         rappel: None,
         cause_orphelin: None,
         rattachement: String::new(),
@@ -344,7 +345,7 @@ fn feu_vert_non_remis_rappele_apres_2_min_puis_saute() {
     e.ticket_mut(1).unwrap().ecoutes = 0;
     let p = planifier(&e, &large(), &config(), H + 119);
     assert!(p.evenements.is_empty());
-    assert!(p.raisons[&1].phrase.contains("pas encore remis"), "{}", p.raisons[&1].phrase);
+    assert!(p.raisons[&1].phrase.contains("pas encore accusé"), "{}", p.raisons[&1].phrase);
     let p = planifier(&e, &large(), &config(), H + 120);
     assert_eq!(p.evenements, vec![Evenement::Rappel(1)]);
     let t = p.etat.ticket(1).unwrap();
@@ -373,28 +374,98 @@ fn bail_d_un_ticket_manuel() {
     let mut avant = e.clone();
     avant.ticket_mut(2).unwrap().presence = H + 599;
     let p = planifier(&avant, &large(), &config(), H + 599);
-    assert!(!p.evenements.iter().any(|ev| matches!(ev, Evenement::Orphelin(1) | Evenement::Bail(1))));
-    assert!(p.raisons[&1].phrase.contains("Bail : orphelin à"), "{}", p.raisons[&1].phrase);
+    assert!(!p.evenements.iter().any(|ev| matches!(
+        ev,
+        Evenement::Orphelin(1) | Evenement::Bail(1) | Evenement::BailDepasse(1)
+    )));
+    assert!(p.raisons[&1].phrase.contains("Bail jusqu'à"), "{}", p.raisons[&1].phrase);
 
+    // À l'échéance : bail dépassé, ticket toujours actif et réservé, la file continue.
     let mut echu = e.clone();
     echu.ticket_mut(2).unwrap().presence = H + 600;
     let p = planifier(&echu, &large(), &config(), H + 600);
+    assert_eq!(p.evenements, vec![Evenement::BailDepasse(1), Evenement::FeuVert(2)]);
+    let t = p.etat.ticket(1).unwrap();
+    assert_eq!((t.etat, t.bail_depasse), (EtatTicket::Actif, true));
+    assert!(p.gel.is_empty(), "{:?}", p.gel);
+    assert!(niveaux(&p.etat, &large(), &config(), H + 600)[Reserve::RamWsl.i()].par.contains(&1));
+    let phrase = &p.raisons[&1].phrase;
+    assert!(phrase.contains("Bail dépassé depuis 0 s"), "{phrase}");
+    assert!(phrase.contains("charge prolonge 1") && phrase.contains("charge fin 1"), "{phrase}");
+    assert!(phrase.contains(&format!("orphelin à {}", hhmm(H + 600 + 900))), "{phrase}");
+
+    // L'événement n'est donné qu'une fois.
+    let mut e = p.etat;
+    e.tickets.retain(|t| t.id != 2);
+    assert!(planifier(&e, &large(), &config(), H + 1000).evenements.is_empty());
+
+    // 15 min après l'échéance sans aucune nouvelle : orphelin, admissions gelées comme avant.
+    let mut attente = ticket(3, Cote::Wsl, 1.0, 1, 5);
+    attente.presence = H + 1500;
+    e.tickets.push(attente);
+    let p = planifier(&e, &large(), &config(), H + 1500);
     assert_eq!(p.evenements, vec![Evenement::Bail(1)]);
     let t = p.etat.ticket(1).unwrap();
     assert_eq!((t.etat, t.cause_orphelin), (EtatTicket::Orphelin, Some(CauseOrphelin::Bail)));
-    assert_eq!(p.raisons[&2].decision, TypeDecision::Gel);
-    assert!(p.raisons[&1].phrase.contains("bail échu"), "{}", p.raisons[&1].phrase);
+    assert_eq!(p.raisons[&3].decision, TypeDecision::Gel);
+    assert!(p.raisons[&1].phrase.contains("bail échu depuis 15 min"), "{}", p.raisons[&1].phrase);
     assert!(p.raisons[&1].phrase.contains("charge prolonge 1"), "{}", p.raisons[&1].phrase);
 
     // Jamais de libération sur les mesures, même mémoire revenue depuis longtemps.
     let mut e = p.etat;
     for k in 0..10 {
-        let quand = H + 700 + k * 30;
-        e.ticket_mut(2).unwrap().presence = quand;
+        let quand = H + 1600 + k * 30;
+        e.ticket_mut(3).unwrap().presence = quand;
         let p = planifier(&e, &frais(large(), quand), &config(), quand);
         assert!(!p.evenements.iter().any(|ev| matches!(ev, Evenement::Libere(1, _))));
         e = p.etat;
     }
+}
+
+#[test]
+fn cas_reel_65_bail_echu_session_vivante_sans_gel() {
+    // Cas réel : #65 (manuel, wsl, 2 Go, 2 cœurs, 15 min) accordé à 13:33:05, bail échu à 13:48:05 alors que la
+    // session travaillait encore ; prolongé de 30 min à 14:13:33, fini à 14:28:45. La file était gelée entre-temps.
+    let (c, m) = (config(), large());
+    let accord = H;
+    let echeance = accord + 15 * 60;
+    let mut t65 = actif(ticket(65, Cote::Wsl, 2.0, 2, 15), accord, 8.0);
+    t65.manuel = true;
+
+    let p = planifier(&etat(vec![t65]), &m, &c, echeance + 1);
+    assert_eq!(p.evenements, vec![Evenement::BailDepasse(65)]);
+    assert!(p.gel.is_empty(), "{:?}", p.gel);
+    assert_eq!(p.raisons[&65].decision, TypeDecision::Actif);
+
+    // Une autre session demande un créneau WSL pendant le dépassement : elle passe sur ce qui reste.
+    let mut e = p.etat;
+    let mut t66 = ticket(66, Cote::Wsl, 3.0, 4, 10);
+    t66.presence = echeance + 60;
+    e.tickets.push(t66);
+    let p = planifier(&e, &m, &c, echeance + 60);
+    assert_eq!(p.evenements, vec![Evenement::FeuVert(66)]);
+    let mut e = p.etat;
+    e.tickets.retain(|t| t.id != 66);
+
+    // La session se manifeste à 14:00:05 (« charge attend 65 ») : l'orphelin recule d'autant.
+    e.ticket_mut(65).unwrap().presence = accord + 27 * 60;
+    let p = planifier(&e, &m, &c, accord + 40 * 60);
+    assert!(p.evenements.is_empty(), "{:?}", p.evenements);
+    assert_eq!(etat_de(&p.etat, 65), Some(EtatTicket::Actif));
+    assert!(p.gel.is_empty(), "{:?}", p.gel);
+    let phrase = &p.raisons[&65].phrase;
+    assert!(phrase.contains("Bail dépassé depuis 25 min"), "{phrase}");
+    assert!(phrase.contains(&format!("orphelin à {}", hhmm(accord + 42 * 60))), "{phrase}");
+
+    // Prolongation de 30 min à 14:13:33 : bail de nouveau en cours.
+    let mut e = p.etat;
+    let prolonge = e.ticket_mut(65).unwrap();
+    prolonge.besoin.duree_s = 40 * 60 + 28 + 30 * 60;
+    prolonge.bail_depasse = false;
+    prolonge.presence = accord + 40 * 60 + 28;
+    let p = planifier(&e, &m, &c, accord + 41 * 60);
+    assert!(p.evenements.is_empty(), "{:?}", p.evenements);
+    assert!(p.raisons[&65].phrase.contains("Bail jusqu'à"), "{}", p.raisons[&65].phrase);
 }
 
 #[test]
