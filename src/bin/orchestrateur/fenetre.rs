@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 
 use commun::format::{coeurs, duree, go};
 use commun::modele::{EtatTicket, Fin, Statut, VueReserve};
@@ -12,7 +12,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     HBRUSH, HDC, HFONT, InvalidateRect, LOGPIXELSY, PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
     TRANSPARENT,
 };
-use windows_sys::Win32::System::ApplicationInstallationAndServicing::{ACTCTXW, ActivateActCtx, CreateActCtxW};
+use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
+    ACTCTXW, ActivateActCtx, CreateActCtxW, DeactivateActCtx, ReleaseActCtx,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
@@ -78,6 +80,8 @@ thread_local! {
 
 static CLASSE: Once = Once::new();
 static STYLES: Once = Once::new();
+/// Contexte d'activation des styles (handle, cookie d'activation ou 0), à rendre sur le fil UI à l'arrêt.
+static CONTEXTE: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 
 fn large(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
@@ -106,12 +110,28 @@ fn activer_styles() {
             let h = CreateActCtxW(&ctx);
             if h != INVALID_HANDLE_VALUE {
                 let mut cookie = 0usize;
-                ActivateActCtx(h, &mut cookie);
+                if ActivateActCtx(h, &mut cookie) == 0 {
+                    cookie = 0;
+                }
+                if let Ok(mut c) = CONTEXTE.lock() {
+                    *c = Some((h as usize, cookie));
+                }
             }
             let icc = INITCOMMONCONTROLSEX { dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES };
             InitCommonControlsEx(&icc);
         }
     });
+}
+
+/// Désactive et rend le contexte des styles ; sur le fil UI, après la boucle de messages.
+pub fn liberer() {
+    let Some((h, cookie)) = CONTEXTE.lock().ok().and_then(|mut c| c.take()) else { return };
+    unsafe {
+        if cookie != 0 {
+            DeactivateActCtx(0, cookie);
+        }
+        ReleaseActCtx(h as _);
+    }
 }
 
 pub fn message_de_dialogue(msg: &MSG) -> bool {
@@ -454,7 +474,7 @@ fn valeurs(r: &VueReserve, statut: &Statut) -> (i64, i64, i64, i64, String) {
     }
     let source = match r.cle.as_str() {
         "ram_wsl" if wsl_frais(&statut.mesures, statut.maintenant).is_some() => " · selon MemAvailable",
-        "ram_wsl" => " · selon 12 Go − vmmemWSL (pas de mesure WSL récente)",
+        "ram_wsl" => " · selon 12 Go − vmmemWSL",
         _ => "",
     };
     let utilise = (r.total - r.disponible).max(0);
@@ -579,9 +599,11 @@ unsafe extern "system" fn procedure(h: HWND, msg: u32, wparam: WPARAM, lparam: L
                 0
             }
             WM_NOTIFY => {
-                let entete = &*(lparam as *const NMHDR);
-                if entete.idFrom == ID_LISTE && entete.code == LVN_ITEMCHANGED {
-                    maj_boutons();
+                if wparam == ID_LISTE && lparam != 0 {
+                    let entete = &*(lparam as *const NMHDR);
+                    if entete.idFrom == ID_LISTE && entete.code == LVN_ITEMCHANGED {
+                        maj_boutons();
+                    }
                 }
                 0
             }

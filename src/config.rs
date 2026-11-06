@@ -105,7 +105,8 @@ swap.debit_sortie = 256
 impl Config {
     pub fn lire(texte: &str) -> Result<Config, String> {
         let mut c = Config::default();
-        for (n, ligne) in texte.lines().enumerate() {
+        // Le Bloc-notes et PowerShell 5 écrivent un BOM en tête des fichiers UTF-8.
+        for (n, ligne) in texte.trim_start_matches('\u{feff}').lines().enumerate() {
             let ligne = ligne.trim();
             if ligne.is_empty() || ligne.starts_with('#') || ligne.starts_with('[') {
                 continue;
@@ -191,6 +192,7 @@ mod tests {
         let c = Config::lire("tube = \"essai-1\"\ndelai.actif = \"3s\"\n").unwrap();
         assert_eq!(c.tube, "essai-1");
         assert_eq!(c.delai_actif_s, 3);
+        assert_eq!(Config::lire("\u{feff}tube = \"essai-2\"\n").unwrap().tube, "essai-2");
         assert!(Config::lire("prot = 1").unwrap_err().contains("clé inconnue"));
         assert!(Config::lire("marge.cpu = deux").is_err());
         assert!(Config::lire("tube = \"a b\"").is_err());

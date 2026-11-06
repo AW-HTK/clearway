@@ -119,9 +119,10 @@ mod imp {
             let mut tampon = vec![0u64; 64];
             let mut taille = 0u32;
             let ok = GetTokenInformation(jeton, TokenUser, tampon.as_mut_ptr().cast(), (tampon.len() * 8) as u32, &mut taille);
+            let erreur = io::Error::last_os_error();
             CloseHandle(jeton);
             if ok == 0 {
-                return Err(io::Error::last_os_error());
+                return Err(erreur);
             }
             let utilisateur = &*(tampon.as_ptr() as *const TOKEN_USER);
             let mut texte: *mut u16 = std::ptr::null_mut();
@@ -158,6 +159,19 @@ mod imp {
 
     // Le descripteur et les handles ne servent qu'au fil d'écoute.
     unsafe impl Send for Ecoute {}
+
+    impl Drop for Ecoute {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(h) = self.suivante.take() {
+                    CloseHandle(h);
+                }
+                if !self.securite.is_null() {
+                    LocalFree(self.securite.cast());
+                }
+            }
+        }
+    }
 
     impl Ecoute {
         fn creer(&self, premiere: bool) -> io::Result<HANDLE> {

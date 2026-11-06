@@ -82,7 +82,7 @@ mod natif {
         Shell_NotifyIconW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CW_USEDEFAULT, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+        AppendMenuW, CW_USEDEFAULT, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
         DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, HICON, MF_SEPARATOR, MF_STRING,
         MSG, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SW_SHOWNORMAL,
         SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE,
@@ -410,7 +410,14 @@ mod natif {
                     DispatchMessageW(&msg);
                 }
             }
+            // WM_DESTROY a déjà retiré l'icône de notification : ses images ne servent plus.
+            for &h in ICONES.get().into_iter().flatten() {
+                if h != 0 {
+                    DestroyIcon(h as HICON);
+                }
+            }
         }
+        fenetre::liberer();
     }
 
     /// Erreur de démarrage : en mode test, stderr seulement ; sinon icône rouge et bulle quelques secondes.

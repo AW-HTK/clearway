@@ -240,6 +240,8 @@ pub fn vue_reserves(e: &Etat, m: &Mesures, c: &Config, maintenant: u64) -> Vec<V
                     })
                     .flatten()
                     .map(|t| t.id),
+                estimation: (r == Reserve::RamWsl && m.vmmem.is_some() && wsl_frais(m, maintenant).is_none())
+                    .then(|| m.wsl.map_or(0, |w| w.quand)),
             }
         })
         .collect()

@@ -476,7 +476,11 @@ impl Serveur {
             "Charge : {actifs} actif(s), {attente} en attente{}\nLibre : Win {} · WSL {} · CPU {}/{}",
             if orphelins > 0 { format!(", {orphelins} orphelin(s)") } else { String::new() },
             niv[0].libre_lisible(),
-            if self.mesures.vmmem.is_some() { niv[1].libre_lisible() } else { "arrêté".into() },
+            match (self.mesures.vmmem, niv[1].estimation) {
+                (None, _) => "arrêté".into(),
+                (Some(_), Some(_)) => format!("≈ {} (estimé)", go(niv[1].libre.max(0))),
+                (Some(_), None) => niv[1].libre_lisible(),
+            },
             niv[2].libre.max(0),
             niv[3].libre.max(0)
         );

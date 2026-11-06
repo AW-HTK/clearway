@@ -318,6 +318,9 @@ pub struct VueReserve {
     /// Ticket WSL exclusif en cours, qui explique un libre CPU WSL négatif.
     #[serde(default)]
     pub exclusif: Option<u64>,
+    /// RAM WSL estimée par 12 Go − vmmemWSL, faute de mesure récente : heure de la dernière mesure (0 : aucune).
+    #[serde(default)]
+    pub estimation: Option<u64>,
 }
 
 impl VueReserve {
@@ -325,6 +328,14 @@ impl VueReserve {
     pub fn libre_lisible(&self) -> String {
         let libre = self.libre.max(0);
         let texte = if self.cle.starts_with("cpu") { crate::format::coeurs(libre) } else { crate::format::go(libre) };
+        if let Some(quand) = self.estimation {
+            let depuis = if quand == 0 {
+                "aucune mesure WSL".to_owned()
+            } else {
+                format!("pas de mesure WSL depuis {}", crate::systeme::hhmm(quand))
+            };
+            return format!("estimation {texte}, cache compris, {depuis}");
+        }
         match self.exclusif {
             Some(id) => format!("{texte} (exclusif #{id})"),
             None => texte,

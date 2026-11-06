@@ -876,3 +876,28 @@ fn reservation_limitee_a_la_montee_en_charge() {
     orphelin.etat = EtatTicket::Orphelin;
     assert_eq!(reservation(&orphelin, Reserve::RamWsl, &m, &c, H), 4096);
 }
+
+#[test]
+fn repli_ram_wsl_affiche_comme_estimation() {
+    let e = etat(Vec::new());
+    let c = config();
+    let ram_wsl = |m: &Mesures, quand: u64| vue_reserves(&e, m, &c, quand).into_iter().find(|r| r.cle == "ram_wsl").unwrap();
+
+    let frais = ram_wsl(&large(), H + 10);
+    assert_eq!(frais.estimation, None);
+    assert!(!frais.libre_lisible().contains("estimation"), "{}", frais.libre_lisible());
+
+    // Mesure WSL périmée : repli 12 Go − vmmemWSL, cache compris, jamais présenté comme un libre mesuré.
+    let mut plein = large();
+    plein.vmmem = Some(Vmmem { pid: 4242, rss_mo: 12 * 1024 });
+    let r = ram_wsl(&plein, H + 120);
+    assert_eq!(r.estimation, Some(H));
+    let texte = r.libre_lisible();
+    assert!(texte.starts_with("estimation 0 Go, cache compris"), "{texte}");
+    assert!(texte.contains(&format!("pas de mesure WSL depuis {}", hhmm(H))), "{texte}");
+
+    plein.wsl = None;
+    assert!(ram_wsl(&plein, H).libre_lisible().ends_with("aucune mesure WSL"));
+    plein.vmmem = None;
+    assert_eq!(ram_wsl(&plein, H).estimation, None, "WSL arrêté : pas d'estimation");
+}
