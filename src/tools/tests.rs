@@ -116,7 +116,7 @@ impl Client {
         let (output_reader, output_writer) = std::io::pipe().unwrap();
         let written = Arc::new(Mutex::new(String::new()));
         let fake = Fake::new(polls_before_clearance, poll_delay, written.clone());
-        let settings = Settings { default_max_s: None, slice_s: 1, progress_every_s: 60, retry_pause: Duration::from_millis(10) };
+        let settings = Settings { default_max_s: None, slice_s: 1, progress_every_s: 60, retry_pause: Duration::from_millis(10), default_side: Side::Wsl };
         let session = SessionInfo { name: "test".into(), dir: "/".into(), ..SessionInfo::default() };
         let tools: Arc<dyn mcp::Provider> = Arc::new(Tools::new(fake.clone(), session, settings));
         let (tx, lines) = mpsc::channel();

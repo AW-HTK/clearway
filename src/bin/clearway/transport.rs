@@ -7,6 +7,8 @@ use clearway::protocol::{RELAY_LOST, read_line_limited};
 
 use crate::server::{self, Shared};
 
+#[cfg(windows)]
+pub use imp::connect;
 pub use imp::{Listener, legacy_instance, listen, relay, single_instance};
 
 const MAX_CONNECTIONS: usize = 64;
@@ -391,7 +393,8 @@ mod imp {
         }
     }
 
-    pub fn relay(pipe: &str) -> i32 {
+    /// Client side of the pipe; `NotFound` when Clearway is not running.
+    pub fn connect(pipe: &str) -> io::Result<(Box<dyn Read + Send>, Box<dyn Write + Send>)> {
         let name = name(pipe);
         let began = Instant::now();
         let h = loop {
@@ -413,30 +416,38 @@ mod imp {
                 ERROR_PIPE_BUSY if began.elapsed() < Duration::from_secs(10) => unsafe {
                     WaitNamedPipeW(name.as_ptr(), 2000);
                 },
-                ERROR_FILE_NOT_FOUND => {
-                    eprintln!(
-                        "{}",
-                        clearway::tr!(
-                            "relay: Clearway is not running (no pipe \\\\.\\pipe\\{pipe}).",
-                            "relais : Clearway absent (aucun tube \\\\.\\pipe\\{pipe})."
-                        )
-                    );
-                    return RELAY_ABSENT;
-                }
-                e => {
-                    eprintln!(
-                        "{}",
-                        clearway::tr!(
-                            "relay: cannot open the pipe \\\\.\\pipe\\{pipe} (error {e}).",
-                            "relais : ouverture du tube \\\\.\\pipe\\{pipe} impossible (erreur {e})."
-                        )
-                    );
-                    return RELAY_LOST;
-                }
+                ERROR_FILE_NOT_FOUND => return Err(io::Error::from(io::ErrorKind::NotFound)),
+                e => return Err(io::Error::from_raw_os_error(e as i32)),
             }
         };
         let pipe = Arc::new(Pipe(h));
-        super::pump(Reader(pipe.clone()), Writer(pipe))
+        Ok((Box::new(Reader(pipe.clone())), Box::new(Writer(pipe))))
+    }
+
+    pub fn relay(pipe: &str) -> i32 {
+        match connect(pipe) {
+            Ok((reader, writer)) => super::pump(reader, writer),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                eprintln!(
+                    "{}",
+                    clearway::tr!(
+                        "relay: Clearway is not running (no pipe \\\\.\\pipe\\{pipe}).",
+                        "relais : Clearway absent (aucun tube \\\\.\\pipe\\{pipe})."
+                    )
+                );
+                RELAY_ABSENT
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    clearway::tr!(
+                        "relay: cannot open the pipe \\\\.\\pipe\\{pipe} ({e}).",
+                        "relais : ouverture du tube \\\\.\\pipe\\{pipe} impossible ({e})."
+                    )
+                );
+                RELAY_LOST
+            }
+        }
     }
 }
 
@@ -512,12 +523,15 @@ mod imp {
         }
     }
 
+    /// Client side of the socket; `NotFound` when Clearway is not running.
+    pub fn connect(pipe: &str) -> io::Result<(Box<dyn Read + Send>, Box<dyn Write + Send>)> {
+        let stream = UnixStream::connect(socket_path(pipe)).map_err(|_| io::Error::from(io::ErrorKind::NotFound))?;
+        Ok((Box::new(stream.try_clone()?), Box::new(stream)))
+    }
+
     pub fn relay(pipe: &str) -> i32 {
-        match UnixStream::connect(socket_path(pipe)) {
-            Ok(stream) => match stream.try_clone() {
-                Ok(read_half) => super::pump(read_half, stream),
-                Err(_) => RELAY_ABSENT,
-            },
+        match connect(pipe) {
+            Ok((reader, writer)) => super::pump(reader, writer),
             Err(_) => {
                 eprintln!(
                     "{}",

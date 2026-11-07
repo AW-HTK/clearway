@@ -38,11 +38,19 @@ pub struct Settings {
     /// Progress is sent on every change of reason and at least this often.
     pub progress_every_s: u64,
     pub retry_pause: Duration,
+    /// Side of a request that does not say: where the MCP server runs.
+    pub default_side: Side,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { default_max_s: None, slice_s: 15, progress_every_s: 60, retry_pause: Duration::from_secs(2) }
+        Settings {
+            default_max_s: None,
+            slice_s: 15,
+            progress_every_s: 60,
+            retry_pause: Duration::from_secs(2),
+            default_side: Side::Wsl,
+        }
     }
 }
 
@@ -225,7 +233,7 @@ impl<C: Channel> Tools<C> {
             .filter(|d| !d.trim().is_empty())
             .ok_or_else(|| tr!("`description` expected", "`description` attendue"))?;
         let side = match arguments["side"].as_str() {
-            None => Side::Wsl,
+            None => self.settings.default_side,
             Some(s) => Side::read(s).ok_or_else(|| tr!("`side`: wsl or windows", "`side` : wsl ou windows"))?,
         };
         let ram_mb = match &arguments["ram"] {
@@ -358,7 +366,11 @@ impl<C: Channel> Provider for Tools<C> {
                 ),
                 "inputSchema": schema(json!({
                     "description": { "type": "string", "description": tr!("What the heavy task is", "Ce qu'est la tâche lourde") },
-                    "side": { "type": "string", "enum": ["wsl", "windows"], "description": tr!("Where it runs (default wsl)", "Où elle tourne (wsl par défaut)") },
+                    "side": { "type": "string", "enum": ["wsl", "windows"], "description": tr!(
+                        "Where it runs (default {})",
+                        "Où elle tourne ({} par défaut)",
+                        self.settings.default_side.name()
+                    ) },
                     "ram": { "type": "string", "description": tr!("Peak RAM, e.g. \"6G\"", "RAM au pic, ex. « 6G »") },
                     "cpu": { "type": "integer", "description": tr!("Cores", "Cœurs") },
                     "duration": { "type": "string", "description": tr!("Expected duration, e.g. \"30m\" (the lease)", "Durée prévue, ex. « 30m » (le bail)") },

@@ -54,6 +54,7 @@ clearway: queue for heavy tasks, served by clearway.exe (Windows) through its re
   clearway release <ticket> [--code N]    releases the slot
   clearway cancel <ticket>                withdraws the request or releases the slot
   clearway status                         queue, reserves and measures
+  clearway mcp [--max-s <seconds>]        MCP server (stdio) for a Claude Code or Codex session
 
 Exit codes: 0 cleared or success, 1 ticket left the queue, 2 error, 3 refused,
 75 still waiting after --max (rerunning the same command keeps the place), 130 interrupted.
@@ -73,6 +74,7 @@ clearway : file des tâches lourdes, servie par clearway.exe (Windows) à traver
   clearway release <ticket> [--code N]    libère le créneau
   clearway cancel <ticket>                retire la demande ou libère le créneau
   clearway status                         file, réserves et mesures
+  clearway mcp [--max-s <secondes>]       serveur MCP (stdio) pour une session Claude Code ou Codex
 
 Codes de sortie : 0 feu vert ou succès, 1 ticket sorti de la file, 2 erreur, 3 refus,
 75 toujours en attente après --max (relancer la même commande garde la place), 130 interrompu.
@@ -144,7 +146,7 @@ fn env_os(name: &str, old: &str) -> Option<OsString> {
     std::env::var_os(name).or_else(|| std::env::var_os(old))
 }
 
-fn env(name: &str, old: &str) -> Option<String> {
+pub(crate) fn env(name: &str, old: &str) -> Option<String> {
     std::env::var(name).or_else(|_| std::env::var(old)).ok()
 }
 
@@ -307,7 +309,7 @@ fn patience() -> Duration {
     Duration::from_secs(env("CLEARWAY_PATIENCE", "CHARGE_PATIENCE").and_then(|p| p.parse().ok()).unwrap_or(PATIENCE_S))
 }
 
-fn find_exe() -> Result<PathBuf, String> {
+pub(crate) fn find_exe() -> Result<PathBuf, String> {
     if let Some(e) = env_os("CLEARWAY_EXE", "CHARGE_EXE") {
         return Ok(PathBuf::from(e));
     }
@@ -325,6 +327,15 @@ fn find_exe() -> Result<PathBuf, String> {
         "clearway.exe not found: install it in %LOCALAPPDATA%\\Programs\\clearway or set CLEARWAY_EXE",
         "clearway.exe introuvable : installe-le dans %LOCALAPPDATA%\\Programs\\clearway ou définis CLEARWAY_EXE"
     ))
+}
+
+/// Starts Clearway as `run` would, unless an update is in progress.
+pub(crate) fn launch_server() {
+    if let Ok(c) = Client::new()
+        && !c.in_maintenance()
+    {
+        c.launch();
+    }
 }
 
 fn wslpath(p: &Path) -> Option<String> {
@@ -520,7 +531,7 @@ fn vmstat(name: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn measures_wsl() -> Option<WslMeasures> {
+pub(crate) fn measures_wsl() -> Option<WslMeasures> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let field = |name: &str| -> Option<u64> {
         meminfo
@@ -685,7 +696,7 @@ fn name_of(path: &Path) -> String {
 }
 
 /// (directory, branch / worktree) of the current directory, from one git call capped at 2 s: repos on /mnt/g are slow.
-fn git_location() -> (String, Option<String>) {
+pub(crate) fn git_location() -> (String, Option<String>) {
     let current = std::env::current_dir().unwrap_or_default();
     let mut child = match Command::new("git")
         .args(["rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD", "--short", "HEAD"])

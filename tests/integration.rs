@@ -943,3 +943,91 @@ fn english_messages() {
     assert!(message.contains("waiting, position 1") && message.contains("Windows RAM"), "{message}");
     assert!(o.log().contains("REQUEST #2"), "{}", o.log());
 }
+
+/// A real `clearway mcp` process for one Claude session, through the relay as under WSL.
+struct Mcp {
+    child: Child,
+    lines: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Mcp {
+    fn start(o: &Orchestra, session_id: &str) -> Mcp {
+        let mut child = o
+            .cli(&["mcp"])
+            .env("CLAUDE_CODE_SESSION_ID", session_id)
+            .env_remove("CLEARWAY_SESSION")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let out = BufReader::new(child.stdout.take().unwrap());
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in out.lines() {
+                let Ok(line) = line else { break };
+                let _ = tx.send(serde_json::from_str(&line).expect("stdout carries JSON-RPC only"));
+            }
+        });
+        let mut m = Mcp { child, lines };
+        m.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }));
+        assert!(m.response(1)["result"]["instructions"].as_str().unwrap().contains("request_clearance"));
+        m
+    }
+
+    fn send(&mut self, v: Value) {
+        writeln!(self.child.stdin.as_mut().unwrap(), "{v}").unwrap();
+    }
+
+    fn response(&self, id: u64) -> Value {
+        loop {
+            let v = self.lines.recv_timeout(Duration::from_secs(20)).expect("MCP response");
+            if v["id"] == id {
+                return v;
+            }
+        }
+    }
+
+    fn tool(&mut self, id: u64, name: &str, arguments: Value) -> Value {
+        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": name, "arguments": arguments, "_meta": { "progressToken": id } } }));
+        self.response(id)["result"].clone()
+    }
+
+    /// End of stdin, as when the session closes.
+    fn close(mut self) {
+        drop(self.child.stdin.take());
+        assert!(wait(Duration::from_secs(5), || matches!(self.child.try_wait(), Ok(Some(_)))), "clearway mcp exits");
+    }
+}
+
+#[test]
+fn mcp_process_links_its_session_and_resumes_it() {
+    let mut o = Orchestra::start("mcp-reel");
+    let mut a = Mcp::start(&o, "sess-int-1");
+    assert!(wait(Duration::from_secs(5), || o.log().contains("LINK #1 ouverte")), "{}", o.log());
+
+    let r = a.tool(2, "request_clearance", json!({ "description": "essai MCP", "ram": "1G", "duration": "10m" }));
+    assert_eq!(r["structuredContent"]["cleared"], true, "{r}");
+    let id = r["structuredContent"]["ticket"].as_u64().unwrap();
+    assert!(wait(Duration::from_secs(3), || o.log().contains(&format!("ACK #{id}"))), "{}", o.log());
+    let t = o.ticket(id).unwrap();
+    assert_eq!(t["session"], "Claude sess-int", "{t}");
+
+    // Session closed: the ticket waits for its session; a new MCP process of the same session resumes it.
+    a.close();
+    assert!(wait(Duration::from_secs(3), || o.log().contains("LINK #1 fermée")), "{}", o.log());
+    let mut b = Mcp::start(&o, "sess-int-1");
+    assert!(wait(Duration::from_secs(5), || o.log().contains(&format!("reprise de #{id}"))), "{}", o.log());
+    assert_eq!(o.ticket_state(id).as_deref(), Some("active"));
+
+    // Clearway restarts: the MCP process links again by itself and keeps the ticket.
+    o.kill();
+    o.launch();
+    let resumed = |log: String| log.matches(&format!("reprise de #{id}")).count() >= 2;
+    assert!(wait(Duration::from_secs(10), || resumed(o.log())), "{}", o.log());
+    let r = b.tool(3, "release", json!({ "ticket": id, "code": 0 }));
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(o.ticket(id).is_none());
+    b.close();
+}

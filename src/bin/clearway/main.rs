@@ -2,6 +2,7 @@
 
 #[cfg(unix)]
 mod client;
+mod mcp_server;
 mod measures;
 mod server;
 mod transport;
@@ -20,7 +21,8 @@ use server::{Shared, Server, log_line};
 
 const MEASURE_INTERVAL: Duration = Duration::from_secs(2);
 
-const USAGE: &str = "clearway serve [--dir <path>] [--test | --test-icon]  |  clearway relay [--pipe <name>]";
+const USAGE: &str =
+    "clearway serve [--dir <path>] [--test | --test-icon]  |  clearway relay [--pipe <name>]  |  clearway mcp [--max-s <s>]";
 
 fn state_root() -> PathBuf {
     match std::env::var_os("LOCALAPPDATA") {
@@ -228,6 +230,7 @@ fn main() {
     let code = match rest.first().map(String::as_str) {
         Some("serve") => serve(&rest[1..]),
         Some("relay" | "relais") => relayer(&rest[1..]),
+        Some("mcp") => mcp_server::main(&rest[1..]),
         _ if cfg!(windows) || program == "orchestrateur" => serve(rest),
         #[cfg(unix)]
         _ => client::main(rest, program == "charge"),
