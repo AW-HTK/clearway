@@ -109,22 +109,35 @@ fn an_active_ticket_of_the_session_lets_the_command_through() {
         ticket(3, TicketState::Active, Some("claude:other"), Some("other")),
         ticket(4, TicketState::Active, Some("claude:abc"), Some("abc")),
     ];
-    assert_eq!(decide("cargo build", "cargo build", "abc", &tickets), Verdict::Allow);
+    assert_eq!(decide("cargo build", "cargo build", "abc", &[], &tickets), Verdict::Allow);
     let codex = [ticket(5, TicketState::Active, Some("codex:t1"), None)];
-    assert_eq!(decide("cargo build", "cargo build", "t1", &codex), Verdict::Allow);
+    assert_eq!(decide("cargo build", "cargo build", "t1", &[], &codex), Verdict::Allow);
     let run = [ticket(6, TicketState::Active, None, Some("abc"))];
-    assert_eq!(decide("cargo build", "cargo build", "abc", &run), Verdict::Allow);
+    assert_eq!(decide("cargo build", "cargo build", "abc", &[], &run), Verdict::Allow);
+}
+
+#[test]
+fn a_codex_ticket_is_found_through_the_codex_process() {
+    let tickets = [ticket(8, TicketState::Active, Some("codex-pid:212042"), None)];
+    assert_eq!(decide("cargo test", "cargo test", "019a2b3c-thread", &[5000, 212042, 7409], &tickets), Verdict::Allow);
+    let Verdict::Deny(reason) = decide("cargo test", "cargo test", "019a2b3c-thread", &[5000, 7409], &tickets) else {
+        panic!("another Codex process must not use this ticket")
+    };
+    assert!(reason.contains("request_clearance"), "{reason}");
+    let waiting = [ticket(9, TicketState::Waiting, Some("codex-pid:212042"), None)];
+    let Verdict::Deny(reason) = decide("cargo test", "cargo test", "", &[212042], &waiting) else { panic!("must deny") };
+    assert!(reason.contains("#9"), "{reason}");
 }
 
 #[test]
 fn without_an_active_ticket_the_reason_says_what_to_do() {
     let others = [ticket(3, TicketState::Active, Some("claude:other"), Some("other"))];
-    let Verdict::Deny(reason) = decide("cargo build", "cargo build", "abc", &others) else { panic!("must deny") };
+    let Verdict::Deny(reason) = decide("cargo build", "cargo build", "abc", &[], &others) else { panic!("must deny") };
     assert!(reason.contains("request_clearance") && reason.contains("clearway run"), "{reason}");
     let waiting = [ticket(7, TicketState::Waiting, Some("claude:abc"), Some("abc"))];
-    let Verdict::Deny(reason) = decide("cargo build", "cargo build", "abc", &waiting) else { panic!("must deny") };
+    let Verdict::Deny(reason) = decide("cargo build", "cargo build", "abc", &[], &waiting) else { panic!("must deny") };
     assert!(reason.contains("#7") && reason.contains("await_clearance"), "{reason}");
-    assert!(matches!(decide("cargo build", "cargo build", "", &others), Verdict::Deny(_)), "no session id, no owner");
+    assert!(matches!(decide("cargo build", "cargo build", "", &[], &others), Verdict::Deny(_)), "no session id, no owner");
 }
 
 #[test]
