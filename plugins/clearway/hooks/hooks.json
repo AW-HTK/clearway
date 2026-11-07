@@ -1,0 +1,11 @@
+{
+  "description": "Refuses a heavy shell command (build, test suite, render, local AI) until the session holds a Clearway slot.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|exec_command|shell|local_shell",
+        "hooks": [{ "type": "command", "command": "clearway hook", "timeout": 10 }]
+      }
+    ]
+  }
+}

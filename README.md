@@ -23,14 +23,18 @@ cargo test -j 4    # unit + integration (Linux build of the server on a Unix soc
   command…`, `clearway request`, `wait`, `extend`, `release`, `cancel`, `status`. Exit codes: 0, 1 ticket out of the
   queue, 2 error, 3 refused, 75 still waiting after `--max` or clearance taken back before the acknowledgement (rerun
   the same command to keep the place), 130 interrupted.
+- Hook: `clearway hook` / `clearway.exe hook` (PreToolUse event on stdin, refusal on stdout).
 - Client variables: `CLEARWAY_EXE`, `CLEARWAY_PIPE`, `CLEARWAY_DIR` (state folder seen from WSL, for the maintenance
   file), `CLEARWAY_LAUNCH_ARGS`, `CLEARWAY_SESSION`, `CLEARWAY_LANG`.
 
 ## Plugins (Claude Code and Codex)
 
 This repository is a plugin marketplace for both. The plugin (`plugins/clearway/`) brings the `clearway` MCP server
-(`clearway mcp`, so `clearway` or `clearway.exe` must be on the `PATH`), the `heavy-tasks` skill and, for Claude Code,
-the `clearance-waiter` agent.
+(`clearway mcp`, so `clearway` or `clearway.exe` must be on the `PATH`), the `heavy-tasks` skill, a PreToolUse hook
+(`clearway hook`) and, for Claude Code, the `clearance-waiter` agent. The hook refuses a heavy shell command (cargo
+build or test, make, npm run build, pytest, docker build…) until the session holds an active ticket; it lets everything
+through when Clearway does not answer within 2 s, and `CLEARWAY_HOOK=off` turns it off. Codex asks the user to trust
+plugin hooks first (`/hooks`).
 
 ```sh
 claude plugin marketplace add AW-HTK/clearway && claude plugin install clearway@clearway --scope user

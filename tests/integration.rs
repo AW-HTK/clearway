@@ -1031,3 +1031,35 @@ fn mcp_process_links_its_session_and_resumes_it() {
     assert!(o.ticket(id).is_none());
     b.close();
 }
+
+fn hook(o: &Orchestra, session_id: &str, command: &str) -> (Option<i32>, String) {
+    let mut child = o.cli(&["hook"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let event = json!({ "session_id": session_id, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+        "tool_input": { "command": command } });
+    writeln!(child.stdin.take().unwrap(), "{event}").unwrap();
+    let out = child.wait_with_output().unwrap();
+    (out.status.code(), text(&out.stdout))
+}
+
+#[test]
+fn hook_refuses_heavy_commands_until_the_session_is_cleared() {
+    let mut o = Orchestra::start("hook");
+    let (code, out) = hook(&o, "sess-hook", "cargo build --release");
+    assert_eq!(code, Some(0));
+    let refusal: Value = serde_json::from_str(out.trim()).expect("JSON refusal");
+    assert_eq!(refusal["hookSpecificOutput"]["permissionDecision"], "deny", "{out}");
+    assert!(out.contains("request_clearance"), "{out}");
+    assert_eq!(hook(&o, "sess-hook", "git status && ls"), (Some(0), String::new()), "light command, no output");
+
+    let mut m = Mcp::start(&o, "sess-hook");
+    let r = m.tool(2, "request_clearance", json!({ "description": "build", "ram": "1G", "duration": "10m" }));
+    let id = r["structuredContent"]["ticket"].as_u64().unwrap();
+    assert_eq!(r["structuredContent"]["cleared"], true, "{r}");
+    assert_eq!(hook(&o, "sess-hook", "cargo build --release"), (Some(0), String::new()), "cleared session");
+    assert!(hook(&o, "other-session", "cargo build").1.contains("deny"), "another session is still refused");
+    m.tool(3, "release", json!({ "ticket": id, "code": 0 }));
+    m.close();
+
+    o.kill();
+    assert_eq!(hook(&o, "sess-hook", "cargo build"), (Some(0), String::new()), "Clearway absent: allowed");
+}

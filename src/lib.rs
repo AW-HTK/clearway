@@ -1,6 +1,7 @@
 pub mod compat;
 pub mod config;
 pub mod format;
+pub mod hook;
 pub mod i18n;
 pub mod link;
 pub mod mcp;

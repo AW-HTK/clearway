@@ -2,6 +2,7 @@
 
 #[cfg(unix)]
 mod client;
+mod hook;
 mod mcp_server;
 mod measures;
 mod server;
@@ -231,6 +232,7 @@ fn main() {
         Some("serve") => serve(&rest[1..]),
         Some("relay" | "relais") => relayer(&rest[1..]),
         Some("mcp") => mcp_server::main(&rest[1..]),
+        Some("hook") => hook::main(&rest[1..]),
         _ if cfg!(windows) || program == "orchestrateur" => serve(rest),
         #[cfg(unix)]
         _ => client::main(rest, program == "charge"),

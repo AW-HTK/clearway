@@ -538,6 +538,8 @@ impl Server {
                     lease_overrun: t.lease_overrun && t.state == TicketState::Active,
                     presence_age_s: now.saturating_sub(t.presence),
                     message: self.reasons.get(&t.id).map(|r| r.message.clone()).unwrap_or_default(),
+                    identity: t.identity.clone(),
+                    claude_session_id: t.claude_session_id.clone(),
                 })
                 .collect(),
             alerts,

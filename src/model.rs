@@ -416,6 +416,11 @@ pub struct TicketView {
     pub branch: Option<String>,
     pub presence_age_s: u64,
     pub message: String,
+    /// Key of the session that owns the ticket (`claude:<id>`, `codex:<id>`…), for the command guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
