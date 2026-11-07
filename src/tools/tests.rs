@@ -116,7 +116,7 @@ impl Client {
         let (output_reader, output_writer) = std::io::pipe().unwrap();
         let written = Arc::new(Mutex::new(String::new()));
         let fake = Fake::new(polls_before_clearance, poll_delay, written.clone());
-        let settings = Settings { default_max_s: None, slice_s: 1, progress_every_s: 60, retry_pause: Duration::from_millis(10), default_side: Side::Wsl };
+        let settings = Settings { default_max_s: None, slice_s: 1, progress_every_s: 60, retry_pause: Duration::from_millis(10), default_side: Side::Wsl, locate: Some(|d| (Some(format!("project of {d}")), Some("feat/x".into()))) };
         let session = SessionInfo { name: "test".into(), dir: "/".into(), ..SessionInfo::default() };
         let tools: Arc<dyn mcp::Provider> = Arc::new(Tools::new(fake.clone(), session, settings));
         let (tx, lines) = mpsc::channel();
@@ -187,6 +187,7 @@ fn request_blocks_with_progress_then_acknowledges_after_the_response() {
     let created = c.fake.requests("POST", "/tickets");
     assert_eq!((created[0].0.body["manual"].as_bool(), created[0].0.body["ack"].as_bool()), (Some(true), Some(true)));
     assert_eq!(created[0].0.body["ram_mb"], 6 * 1024);
+    assert_eq!(created[0].0.body["dir"], "/", "without `dir`, the session's folder");
     let waits = c.fake.requests("GET", "/wait");
     assert!(waits.iter().all(|(r, _)| r.param("ack") == Some("1") && r.param("timeout_s") == Some("1")));
     // The acknowledgement leaves only once the response line has been written.
@@ -288,4 +289,14 @@ fn end_of_stdin_stops_the_server_during_a_wait() {
     assert!(began.elapsed() < Duration::from_secs(2));
     std::thread::sleep(Duration::from_millis(200));
     assert!(c.fake.requests("DELETE", "").is_empty() && c.fake.requests("POST", "/ack").is_empty());
+}
+
+#[test]
+fn a_request_names_the_worktree_it_runs_in() {
+    let mut c = Client::start(1, Duration::ZERO);
+    c.call(3, "request_clearance", json!({ "description": "tests", "dir": "/w/nuages-v2" }));
+    c.until_response(3);
+    let created = c.fake.requests("POST", "/tickets");
+    let body = &created[0].0.body;
+    assert_eq!((body["dir"].as_str(), body["project"].as_str(), body["branch"].as_str()), (Some("/w/nuages-v2"), Some("project of /w/nuages-v2"), Some("feat/x")));
 }
