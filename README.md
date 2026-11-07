@@ -1,53 +1,70 @@
-# Orchestrateur de charge Windows + WSL
+# Clearway
 
-`orchestrateur.exe` (Windows, icône de notification, petite fenêtre native) distribue les créneaux de
-tâches lourdes dans l'ordre d'arrivée ; `charge` (WSL) les demande. Conception : `~/tmp/orchestrateur/PLAN.md`.
+Clearway queues heavy tasks (builds, test suites, renders, local AI) between several AI coding sessions on one
+Windows + WSL machine, so that they do not exhaust the RAM together. `clearway.exe` (Windows: tray icon, small native
+window) grants slots in arrival order with backfilling; sessions ask for them with the `clearway` client (WSL).
+Messages are in English or French.
 
-## Construire
+## Build
 
 ```sh
 export PATH=$HOME/.cargo/bin:$(echo ~/.local/share/uv/tools/cargo-zigbuild/lib/python*/site-packages/ziglang):$PATH
-cargo build --release -j 4 --bin charge                                          # client Linux
-cargo zigbuild --release -j 4 --target x86_64-pc-windows-gnu --bin orchestrateur # exe Windows
-cargo test -j 4    # unitaires + intégration (serveur en version Linux sur socket Unix, mesures simulées)
+cargo build --release -j 4 --bin clearway                                          # Linux client (and test server)
+cargo zigbuild --release -j 4 --target x86_64-pc-windows-gnu --bin clearway        # clearway.exe
+cargo test -j 4    # unit + integration (Linux build of the server on a Unix socket, simulated measures)
 ```
 
-## Transport
+## Commands
 
-- L'exe écoute sur le tube nommé `\\.\pipe\orchestrateur` (ACL : le compte courant et SYSTEM, clients
-  distants refusés). Une requête JSON par ligne, une réponse par ligne ; routes de la section 6 du plan.
-- `charge` lance `orchestrateur.exe relais --tube <nom>` par l'interop WSL (stdin/stdout ↔ tube).
-  Relais : code 69 si l'orchestrateur est absent (le client le lance alors une fois), 74 si le tube se ferme.
-- Hors Windows (tests), le tube est une socket Unix `$XDG_RUNTIME_DIR/orchestrateur-<tube>.sock`.
-- Multiplexage : une requête avec `"id"` est traitée sur son propre fil et sa réponse porte le même `id`, dans
-  n'importe quel ordre ; sans `id`, l'ancien mode séquentiel. Le relais copie dans les deux sens à la fois (tube
-  en E/S asynchrone sous Windows) ; à la fin de stdin, il rend encore les réponses aux requêtes sans `id`.
-- Liaison : `POST /liaison` (`identite`, `session`, `client`, `mesures`) lie la connexion à une session (processus
-  MCP), `POST /liaison/battement` y porte les mesures WSL et la présence de ses tickets actifs. À la fermeture de
-  la connexion, ses tickets attendent `delai.reprise` (2 min) une nouvelle liaison de la même `identite` (actifs :
-  orphelins « connexion », réservés, sans gel ; en attente : sautés), puis sont retirés. Même règle après un
-  redémarrage de l'orchestrateur.
+- Server (Windows): `clearway.exe [serve] [--dir <path>] [--test | --test-icon]`. `--test`: nothing on screen.
+- Relay: `clearway.exe relay [--pipe <name>]` (stdin/stdout ↔ named pipe; exit 69 if the server is absent, 74 if
+  the pipe closes).
+- Client (WSL): `clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--duration 15m] [--max 9m] "description" --
+  command…`, `clearway request`, `wait`, `extend`, `release`, `cancel`, `status`. Exit codes: 0, 1 ticket out of the
+  queue, 2 error, 3 refused, 75 still waiting after `--max` or clearance taken back before the acknowledgement (rerun
+  the same command to keep the place), 130 interrupted.
+- Client variables: `CLEARWAY_EXE`, `CLEARWAY_PIPE`, `CLEARWAY_DIR` (state folder seen from WSL, for the maintenance
+  file), `CLEARWAY_LAUNCH_ARGS`, `CLEARWAY_SESSION`, `CLEARWAY_LANG`.
 
-## Installer
+## Files
 
-- Exe : `%LOCALAPPDATA%\Programs\orchestrateur\orchestrateur.exe`.
-- État : `%LOCALAPPDATA%\orchestrateur\` (`etat.json`, `journal.log`, `config.toml` créé au premier démarrage).
-- Client : copier `target/release/charge` dans le `PATH` de WSL.
-- `windows/installer-tache.ps1` : tâche planifiée à l'ouverture de session (à lancer par Adel).
+- Exe: `%LOCALAPPDATA%\Programs\clearway\clearway.exe`; scheduled task `Clearway` (`windows/install-task.ps1`),
+  updates with `windows/reinstall.ps1`.
+- State: `%LOCALAPPDATA%\clearway\` (`state.json`, `clearway.log`, `config.toml` written at first start).
+- `config.toml`: `pipe`, `legacy_pipe`, `language` (`en`, `fr`, `auto`), reserves, margins, default needs, delays,
+  backfill and swap thresholds; the file written at first start documents every key.
 
-## Options
+## Protocol
 
-- `orchestrateur --dossier <chemin>` : autre dossier d'état (son `config.toml` choisit le tube).
-- `--test` : rien à l'écran (ni icône, ni bulle, fenêtre hors écran) ; `--test-icone` : icône sans bulle.
-- Client : `CHARGE_EXE`, `CHARGE_TUBE`, `CHARGE_DOSSIER` (pour le lancement automatique),
-  `CHARGE_ARGS_LANCEMENT`, `CHARGE_SESSION`.
-- Codes de `charge` : 0, 1 ticket sorti de la file, 2 erreur, 3 refus, 75 toujours en attente après `--max`
-  ou feu vert repris avant l'accusé (relancer la même commande garde la place), 130 interrompu.
-- Accusé de feu vert : `charge attend` et `charge run` envoient `accuse=1`, puis `POST /tickets/<n>/recu` une
-  fois le feu vert transmis ; sans accusé dans `delai.rappel`, le feu vert est repris.
+- Named pipe `\\.\pipe\clearway` (ACL: current user and SYSTEM, remote clients refused); a Unix socket
+  `$XDG_RUNTIME_DIR/clearway-<pipe>.sock` outside Windows. One JSON request per line
+  (`{"method","path","params","body"}`), one response per line (`{"code","body"}`).
+- Routes: `POST /tickets`, `GET /tickets/{n}/wait` (`known`, `timeout_s`, `ack`), `POST /tickets/{n}/presence`,
+  `/extend`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
+  `/link/heartbeat`.
+- Multiplexing: a request with an `"id"` runs on its own thread and its response carries the same `id`, in any order;
+  without `id`, requests are served one after the other. The relay copies both ways at once (overlapped I/O on
+  Windows); at the end of stdin it still delivers the responses to requests without `id`.
+- Clearance acknowledgement: `clearway wait` and `clearway run` send `ack=1`, then `POST /tickets/{n}/ack` once the
+  clearance has really been delivered; without it within `delay.recall`, the clearance is taken back.
+- Links: `POST /link` (`identity`, `session`, `client`, `measures`) ties the connection to a session (MCP process);
+  `POST /link/heartbeat` carries the WSL measures and the presence of its active tickets. When the connection closes
+  (or after a server restart), its tickets wait `delay.resume` for a link with the same `identity` (active ones stay
+  reserved without freezing the queue, waiting ones are skipped), then are removed.
 
-## Essais sous Windows réel (instance de test, rien à l'écran)
+## Compatibility with the pre-Clearway version
 
-- `tests/essai-windows-api.ps1` : exe seul, client PowerShell sur le tube.
-- `tests/essai-windows.sh` : bout en bout depuis WSL avec le vrai `charge` et le relais.
-- `tests/capture-fenetre.ps1 <sortie.png>` : capture de la fenêtre composée hors écran.
+- The server also listens on the old pipe `orchestrateur` (`legacy_pipe = true`), accepts the old French dialect
+  (`methode`, `chemin`, French routes and keys) and answers it in that dialect.
+- Called as `charge` (link to `clearway`), the client keeps the old subcommands (`demande`, `attend`, `fin`, `annule`,
+  `prolonge`, `statut`), the old `CHARGE_*` variables and French messages; called as `orchestrateur.exe`, the exe still
+  accepts `relais --tube`.
+- First start: `%LOCALAPPDATA%\orchestrateur\` is copied to `%LOCALAPPDATA%\clearway\` (old folder kept, with
+  `MIGRATED-TO-CLEARWAY.txt`); `etat.json` becomes `state.json`, a French `config.toml` is rewritten in English (backup
+  `config.toml.before-clearway`). One-time switch: `windows/migrate-to-clearway.ps1`.
+
+## Tests on real Windows (test instance, nothing on screen)
+
+- `tests/windows-api.ps1`: the exe alone, PowerShell client on the pipe.
+- `tests/windows-e2e.sh`: end to end from WSL with the real client and relay.
+- `tests/window-capture.ps1 <out.png>`: capture of the off-screen window.

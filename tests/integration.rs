@@ -4,22 +4,23 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use commun::protocole::{RELAIS_ABSENT, chemin_socket};
+use clearway::protocol::{RELAY_ABSENT, socket_path};
 use serde_json::{Value, json};
 
-const CONFIG_RAPIDE: &str = "marge.ram_windows = \"4G\"\n\
-    delai.actif = \"3s\"\ndelai.attente = \"4s\"\ndelai.absence = \"8s\"\ndelai.rappel = \"3s\"\ndelai.long_poll = \"2s\"\n\
-    delai.reprise = \"3s\"\n";
+/// Short delays for the tests; French messages, as the assertions are written against them.
+const FAST_CONFIG: &str = "margin.ram_windows = \"4G\"\n\
+    delay.silence = \"3s\"\ndelay.unattended = \"4s\"\ndelay.absence = \"8s\"\ndelay.recall = \"3s\"\ndelay.long_poll = \"2s\"\n\
+    delay.resume = \"3s\"\nlanguage = \"fr\"\n";
 
-struct Orchestre {
-    enfant: Option<Child>,
-    dossier: PathBuf,
-    tube: String,
+struct Orchestra {
+    child: Option<Child>,
+    dir: PathBuf,
+    pipe: String,
 }
 
-fn attendre<F: FnMut() -> bool>(max: Duration, mut condition: F) -> bool {
-    let fin = Instant::now() + max;
-    while Instant::now() < fin {
+fn wait<F: FnMut() -> bool>(max: Duration, mut condition: F) -> bool {
+    let end = Instant::now() + max;
+    while Instant::now() < end {
         if condition() {
             return true;
         }
@@ -28,683 +29,684 @@ fn attendre<F: FnMut() -> bool>(max: Duration, mut condition: F) -> bool {
     false
 }
 
-impl Orchestre {
-    fn preparer(nom: &str) -> Orchestre {
-        let dossier = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(nom);
-        let _ = std::fs::remove_dir_all(&dossier);
-        std::fs::create_dir_all(&dossier).unwrap();
-        let tube = format!("essai-{nom}-{}", std::process::id());
-        std::fs::write(dossier.join("config.toml"), format!("tube = \"{tube}\"\n{CONFIG_RAPIDE}")).unwrap();
-        Orchestre { enfant: None, dossier, tube }
+impl Orchestra {
+    fn prepare(name: &str) -> Orchestra {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipe = format!("essai-{name}-{}", std::process::id());
+        std::fs::write(dir.join("config.toml"), format!("pipe = \"{pipe}\"\n{FAST_CONFIG}")).unwrap();
+        Orchestra { child: None, dir, pipe }
     }
 
-    fn demarrer(nom: &str) -> Orchestre {
-        let mut o = Orchestre::preparer(nom);
-        o.lancer();
+    fn start(name: &str) -> Orchestra {
+        let mut o = Orchestra::prepare(name);
+        o.launch();
         o
     }
 
-    fn processus(&self) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_orchestrateur"));
-        c.arg("--dossier").arg(&self.dossier).arg("--test").stdout(Stdio::null()).stderr(Stdio::null());
+    fn process(&self) -> Command {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_clearway"));
+        c.arg("serve").arg("--dir").arg(&self.dir).arg("--test").stdout(Stdio::null()).stderr(Stdio::null());
         c
     }
 
-    fn repond(&self) -> bool {
-        UnixStream::connect(chemin_socket(&self.tube)).is_ok()
+    fn answers(&self) -> bool {
+        UnixStream::connect(socket_path(&self.pipe)).is_ok()
     }
 
-    fn lancer(&mut self) {
-        self.enfant = Some(self.processus().spawn().unwrap());
-        assert!(attendre(Duration::from_secs(10), || self.repond()), "l'orchestrateur ne répond pas sur {}", self.tube);
+    fn launch(&mut self) {
+        self.child = Some(self.process().spawn().unwrap());
+        assert!(wait(Duration::from_secs(10), || self.answers()), "Clearway does not answer on {}", self.pipe);
     }
 
-    fn tuer(&mut self) {
-        if let Some(mut e) = self.enfant.take() {
+    fn kill(&mut self) {
+        if let Some(mut e) = self.child.take() {
             let _ = e.kill();
             let _ = e.wait();
         }
     }
 
-    fn appel(&self, methode: &str, chemin: &str, corps: Value) -> (u16, Value) {
-        self.appel_avec(methode, chemin, json!({}), corps)
+    fn call(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
+        self.call_with(method, path, json!({}), body)
     }
 
-    fn appel_avec(&self, methode: &str, chemin: &str, parametres: Value, corps: Value) -> (u16, Value) {
-        let mut flux = UnixStream::connect(chemin_socket(&self.tube)).unwrap();
-        let req = json!({ "methode": methode, "chemin": chemin, "parametres": parametres, "corps": corps });
-        flux.write_all(format!("{req}\n").as_bytes()).unwrap();
-        let mut ligne = String::new();
-        BufReader::new(&flux).read_line(&mut ligne).unwrap();
-        let rep: Value = serde_json::from_str(&ligne).unwrap();
-        (rep["code"].as_u64().unwrap() as u16, rep["corps"].clone())
+    fn call_with(&self, method: &str, path: &str, params: Value, body: Value) -> (u16, Value) {
+        let mut stream = UnixStream::connect(socket_path(&self.pipe)).unwrap();
+        let req = json!({ "method": method, "path": path, "params": params, "body": body });
+        stream.write_all(format!("{req}\n").as_bytes()).unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        let rep: Value = serde_json::from_str(&line).unwrap();
+        (rep["code"].as_u64().unwrap() as u16, rep["body"].clone())
     }
 
-    fn creer(&self, requete: &str, cote: &str, ram_mo: u64) -> (u16, Value) {
-        self.appel(
+    fn create(&self, req_text: &str, side: &str, ram_mb: u64) -> (u16, Value) {
+        self.call(
             "POST",
             "/tickets",
             json!({
-                "requete_id": requete, "cote": cote, "ram_mo": ram_mo, "cpu": 1, "duree_s": 600,
-                "description": format!("essai {requete}"), "session": "test", "claude_session_id": null,
-                "claude_pid": null, "dossier": "/", "signature": "", "mesures": null
+                "request_id": req_text, "side": side, "ram_mb": ram_mb, "cpu": 1, "duration_s": 600,
+                "description": format!("essai {req_text}"), "session": "test", "claude_session_id": null,
+                "claude_pid": null, "dir": "/", "signature": "", "mesures": null
             }),
         )
     }
 
-    fn attente_brute(&self, id: u64, accuse: bool) -> (u16, Value) {
-        let mut parametres = json!({ "connu": "", "delai_s": "2" });
-        if accuse {
-            parametres["accuse"] = json!("1");
+    fn raw_wait(&self, id: u64, ack: bool) -> (u16, Value) {
+        let mut params = json!({ "known": "", "timeout_s": "2" });
+        if ack {
+            params["ack"] = json!("1");
         }
-        self.appel_avec("GET", &format!("/tickets/{id}/attente"), parametres, Value::Null)
+        self.call_with("GET", &format!("/tickets/{id}/wait"), params, Value::Null)
     }
 
-    fn etat(&self) -> Value {
-        self.appel("GET", "/etat", Value::Null).1
+    fn state(&self) -> Value {
+        self.call("GET", "/status", Value::Null).1
     }
 
     fn ticket(&self, id: u64) -> Option<Value> {
-        self.etat()["tickets"].as_array().unwrap().iter().find(|t| t["id"] == id).cloned()
+        self.state()["tickets"].as_array().unwrap().iter().find(|t| t["id"] == id).cloned()
     }
 
-    fn etat_ticket(&self, id: u64) -> Option<String> {
-        self.ticket(id).map(|t| t["etat"].as_str().unwrap().to_owned())
+    fn ticket_state(&self, id: u64) -> Option<String> {
+        self.ticket(id).map(|t| t["state"].as_str().unwrap().to_owned())
     }
 
-    fn charge(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_charge"));
+    fn cli(&self, args: &[&str]) -> Command {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_clearway"));
         c.args(args)
-            .env("CHARGE_EXE", env!("CARGO_BIN_EXE_orchestrateur"))
-            .env("CHARGE_TUBE", &self.tube)
-            .env("CHARGE_DOSSIER", &self.dossier)
-            .env("CHARGE_ARGS_LANCEMENT", "--test")
-            .env("CHARGE_SESSION", "test")
+            .env("CLEARWAY_EXE", env!("CARGO_BIN_EXE_clearway"))
+            .env("CLEARWAY_PIPE", &self.pipe)
+            .env("CLEARWAY_DIR", &self.dir)
+            .env("CLEARWAY_LAUNCH_ARGS", "--test")
+            .env("CLEARWAY_SESSION", "test")
+            .env("LC_ALL", "fr_FR.UTF-8")
             .env_remove("CLAUDE_CODE_SESSION_ID")
             .env_remove("CLAUDE_PID");
         c
     }
 
-    fn sortie(&self, args: &[&str]) -> Output {
-        self.charge(args).output().unwrap()
+    fn out(&self, args: &[&str]) -> Output {
+        self.cli(args).output().unwrap()
     }
 
-    fn journal(&self) -> String {
-        std::fs::read_to_string(self.dossier.join("journal.log")).unwrap_or_default()
+    fn log(&self) -> String {
+        std::fs::read_to_string(self.dir.join("clearway.log")).unwrap_or_default()
     }
 }
 
-/// Connexion gardée ouverte, comme celle d'un processus MCP : plusieurs requêtes, éventuellement en parallèle.
-struct Ligne {
-    flux: UnixStream,
-    lecteur: BufReader<UnixStream>,
+/// Connection kept open, like an MCP process's: several requests, possibly in parallel.
+struct Line {
+    stream: UnixStream,
+    reader: BufReader<UnixStream>,
 }
 
-impl Ligne {
-    fn ouvrir(o: &Orchestre) -> Ligne {
-        let flux = UnixStream::connect(chemin_socket(&o.tube)).unwrap();
-        let lecteur = BufReader::new(flux.try_clone().unwrap());
-        Ligne { flux, lecteur }
+impl Line {
+    fn open(o: &Orchestra) -> Line {
+        let stream = UnixStream::connect(socket_path(&o.pipe)).unwrap();
+        let reader = BufReader::new(stream.try_clone().unwrap());
+        Line { stream, reader }
     }
 
-    fn envoyer(&mut self, requete: Value) {
-        self.flux.write_all(format!("{requete}\n").as_bytes()).unwrap();
+    fn send(&mut self, req_text: Value) {
+        self.stream.write_all(format!("{req_text}\n").as_bytes()).unwrap();
     }
 
-    fn lire(&mut self) -> Value {
-        let mut ligne = String::new();
-        self.lecteur.read_line(&mut ligne).unwrap();
-        serde_json::from_str(&ligne).unwrap()
+    fn read(&mut self) -> Value {
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
     }
 
-    fn appel(&mut self, methode: &str, chemin: &str, corps: Value) -> Value {
-        self.envoyer(json!({ "methode": methode, "chemin": chemin, "corps": corps }));
-        self.lire()
+    fn call(&mut self, method: &str, path: &str, body: Value) -> Value {
+        self.send(json!({ "method": method, "path": path, "body": body }));
+        self.read()
     }
 
-    fn lier(&mut self, identite: &str) -> Value {
-        self.appel("POST", "/liaison", json!({ "identite": identite, "session": "essai MCP", "client": "test" }))
+    fn open_link(&mut self, identity: &str) -> Value {
+        self.call("POST", "/link", json!({ "identity": identity, "session": "essai MCP", "client": "test" }))
     }
 
-    fn creer(&mut self, requete: &str, ram_mo: u64) -> Value {
-        self.appel(
+    fn create(&mut self, req_text: &str, ram_mb: u64) -> Value {
+        self.call(
             "POST",
             "/tickets",
             json!({
-                "requete_id": requete, "cote": "windows", "ram_mo": ram_mo, "cpu": 1, "duree_s": 600, "manuel": true,
-                "description": format!("essai {requete}"), "session": "essai MCP", "claude_session_id": null,
-                "claude_pid": null, "dossier": "/", "signature": "", "mesures": null
+                "request_id": req_text, "side": "windows", "ram_mb": ram_mb, "cpu": 1, "duration_s": 600, "manual": true,
+                "description": format!("essai {req_text}"), "session": "essai MCP", "claude_session_id": null,
+                "claude_pid": null, "dir": "/", "signature": "", "mesures": null
             }),
         )
     }
 }
 
-impl Drop for Orchestre {
+impl Drop for Orchestra {
     fn drop(&mut self) {
-        if self.enfant.is_some() && self.repond() {
-            let _ = self.appel("POST", "/quitter", Value::Null);
-            if let Some(e) = self.enfant.as_mut() {
-                let _ = attendre(Duration::from_secs(3), || matches!(e.try_wait(), Ok(Some(_))));
+        if self.child.is_some() && self.answers() {
+            let _ = self.call("POST", "/quit", Value::Null);
+            if let Some(e) = self.child.as_mut() {
+                let _ = wait(Duration::from_secs(3), || matches!(e.try_wait(), Ok(Some(_))));
             }
         }
-        self.tuer();
+        self.kill();
     }
 }
 
-fn texte(o: &[u8]) -> String {
+fn text(o: &[u8]) -> String {
     String::from_utf8_lossy(o).into_owned()
 }
 
 #[test]
-fn demande_attente_fin_et_statut() {
-    let o = Orchestre::demarrer("cycle");
-    let a = o.sortie(&["demande", "--cote", "windows", "--ram", "10G", "tâche A"]);
-    assert_eq!(a.status.code(), Some(0), "{}", texte(&a.stderr));
-    assert_eq!(texte(&a.stdout).trim(), "1");
-    assert!(texte(&a.stderr).contains("feu vert"), "{}", texte(&a.stderr));
+fn request_wait_release_and_status() {
+    let o = Orchestra::start("cycle");
+    let a = o.out(&["request", "--side", "windows", "--ram", "10G", "tâche A"]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    assert_eq!(text(&a.stdout).trim(), "1");
+    assert!(text(&a.stderr).contains("feu vert"), "{}", text(&a.stderr));
 
-    let b = o.sortie(&["demande", "--cote", "windows", "--ram", "8G", "session B", "tâche B"]);
-    assert_eq!(texte(&b.stdout).trim(), "2");
-    assert!(texte(&b.stderr).contains("RAM Windows insuffisante"), "{}", texte(&b.stderr));
-    assert!(texte(&b.stderr).contains("Débloqué à la fin du #1"), "{}", texte(&b.stderr));
+    let b = o.out(&["request", "--side", "windows", "--ram", "8G", "session B", "tâche B"]);
+    assert_eq!(text(&b.stdout).trim(), "2");
+    assert!(text(&b.stderr).contains("RAM Windows insuffisante"), "{}", text(&b.stderr));
+    assert!(text(&b.stderr).contains("Débloqué à la fin du #1"), "{}", text(&b.stderr));
 
-    let attente = o.charge(&["attend", "2"]).stdout(Stdio::piped()).spawn().unwrap();
+    let waiting = o.cli(&["wait", "2"]).stdout(Stdio::piped()).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    let statut = o.sortie(&["statut"]);
-    let s = texte(&statut.stdout);
+    let status_view = o.out(&["status"]);
+    let s = text(&status_view.stdout);
     assert!(s.contains("#1") && s.contains("actif") && s.contains("(manuel)") && s.contains("#2"), "{s}");
 
-    let f = o.sortie(&["fin", "1"]);
+    let f = o.out(&["release", "1"]);
     assert_eq!(f.status.code(), Some(0));
-    assert!(texte(&f.stdout).contains("terminé"), "{}", texte(&f.stdout));
-    let sortie = attente.wait_with_output().unwrap();
-    assert_eq!(sortie.status.code(), Some(0));
-    let lignes = texte(&sortie.stdout);
-    assert!(lignes.contains("position 1"), "{lignes}");
-    assert!(lignes.contains("FEU VERT pour le ticket #2"), "{lignes}");
+    assert!(text(&f.stdout).contains("terminé"), "{}", text(&f.stdout));
+    let out = waiting.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let lines = text(&out.stdout);
+    assert!(lines.contains("position 1"), "{lines}");
+    assert!(lines.contains("FEU VERT pour le ticket #2"), "{lines}");
 
-    assert_eq!(o.sortie(&["annule", "2"]).status.code(), Some(0));
-    assert_eq!(o.sortie(&["fin", "2"]).status.code(), Some(1));
-    let j = o.journal();
-    for attendu in ["DÉMARRAGE époque 1", "DEMANDE #1", "FEU VERT #1", "ATTENTE #2", "FIN #1", "FEU VERT #2", "ANNULÉ #2"] {
-        assert!(j.contains(attendu), "journal sans « {attendu} » :\n{j}");
+    assert_eq!(o.out(&["cancel", "2"]).status.code(), Some(0));
+    assert_eq!(o.out(&["release", "2"]).status.code(), Some(1));
+    let j = o.log();
+    for expected in ["START époque 1", "REQUEST #1", "CLEARED #1", "WAITING #2", "RELEASED #1", "CLEARED #2", "CANCELLED #2"] {
+        assert!(j.contains(expected), "journal sans « {expected} » :\n{j}");
     }
 }
 
 #[test]
-fn refus_immediat_et_cpu_exclusif() {
-    let o = Orchestre::demarrer("refus");
-    let r = o.sortie(&["demande", "--cote", "windows", "--ram", "40G", "trop gros"]);
+fn immediate_refusal_and_exclusive_cpu() {
+    let o = Orchestra::start("refus");
+    let r = o.out(&["request", "--side", "windows", "--ram", "40G", "trop gros"]);
     assert_eq!(r.status.code(), Some(3));
-    assert!(texte(&r.stdout).is_empty());
-    assert!(texte(&r.stderr).contains("RAM Windows impossible"), "{}", texte(&r.stderr));
-    let r = o.sortie(&["run", "--cpu", "11", "trop de cœurs", "--", "true"]);
+    assert!(text(&r.stdout).is_empty());
+    assert!(text(&r.stderr).contains("RAM Windows impossible"), "{}", text(&r.stderr));
+    let r = o.out(&["run", "--cpu", "11", "trop de cœurs", "--", "true"]);
     assert_eq!(r.status.code(), Some(3));
-    assert!(texte(&r.stderr).contains("--cpu à 10 max"), "{}", texte(&r.stderr));
-    let r = o.sortie(&["run", "--cpu", "10", "--ram", "1G", "exclusif", "--", "true"]);
-    assert_eq!(r.status.code(), Some(0), "{}", texte(&r.stderr));
-    assert!(o.etat()["tickets"].as_array().unwrap().is_empty());
+    assert!(text(&r.stderr).contains("--cpu à 10 max"), "{}", text(&r.stderr));
+    let r = o.out(&["run", "--cpu", "10", "--ram", "1G", "exclusif", "--", "true"]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert!(o.state()["tickets"].as_array().unwrap().is_empty());
 }
 
 #[test]
-fn run_lance_la_commande_et_rend_son_code() {
-    let o = Orchestre::demarrer("run");
-    let r = o.sortie(&["run", "--cote", "windows", "--ram", "1G", "écho", "--", "sh", "-c", "echo bonjour; exit 7"]);
-    assert_eq!(r.status.code(), Some(7), "{}", texte(&r.stderr));
-    assert_eq!(texte(&r.stdout).trim(), "bonjour");
-    assert!(texte(&r.stderr).contains("feu vert #1"), "{}", texte(&r.stderr));
-    assert!(o.etat()["tickets"].as_array().unwrap().is_empty());
-    assert!(o.journal().contains("code 7"), "{}", o.journal());
+fn run_launches_the_command_and_returns_its_code() {
+    let o = Orchestra::start("run");
+    let r = o.out(&["run", "--side", "windows", "--ram", "1G", "écho", "--", "sh", "-c", "echo bonjour; exit 7"]);
+    assert_eq!(r.status.code(), Some(7), "{}", text(&r.stderr));
+    assert_eq!(text(&r.stdout).trim(), "bonjour");
+    assert!(text(&r.stderr).contains("feu vert #1"), "{}", text(&r.stderr));
+    assert!(o.state()["tickets"].as_array().unwrap().is_empty());
+    assert!(o.log().contains("code 7"), "{}", o.log());
 }
 
 #[test]
-fn run_attend_son_tour() {
-    let o = Orchestre::demarrer("run-attente");
-    let (code, a) = o.creer("occupant", "windows", 12 * 1024);
+fn run_waits_its_turn() {
+    let o = Orchestra::start("run-attente");
+    let (code, a) = o.create("occupant", "windows", 12 * 1024);
     assert_eq!(code, 201);
-    assert_eq!(a["etat"], "actif");
+    assert_eq!(a["state"], "active");
     let run = o
-        .charge(&["run", "--cote", "windows", "--ram", "8G", "second", "--", "sh", "-c", "echo parti"])
+        .cli(&["run", "--side", "windows", "--ram", "8G", "second", "--", "sh", "-c", "echo parti"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_millis(800));
-    assert_eq!(o.etat_ticket(2).as_deref(), Some("attente"));
-    o.appel("POST", "/tickets/1/fin", json!({}));
-    let sortie = run.wait_with_output().unwrap();
-    assert_eq!(sortie.status.code(), Some(0), "{}", texte(&sortie.stderr));
-    assert!(texte(&sortie.stderr).contains("en attente, position 1"), "{}", texte(&sortie.stderr));
-    assert_eq!(texte(&sortie.stdout).trim(), "parti");
-    assert!(o.journal().contains("ACCUSÉ #2"), "{}", o.journal());
+    assert_eq!(o.ticket_state(2).as_deref(), Some("waiting"));
+    o.call("POST", "/tickets/1/release", json!({}));
+    let out = run.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("en attente, position 1"), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).trim(), "parti");
+    assert!(o.log().contains("ACK #2"), "{}", o.log());
 }
 
 #[test]
-fn max_rend_75_et_la_meme_commande_reprend_son_ticket() {
-    let o = Orchestre::demarrer("rattachement");
-    o.creer("occupant", "windows", 12 * 1024);
-    let args = ["run", "--cote", "windows", "--ram", "8G", "--max", "2s", "patient", "--", "echo", "enfin"];
-    let r = o.sortie(&args);
-    assert_eq!(r.status.code(), Some(75), "{}", texte(&r.stderr));
-    assert!(texte(&r.stderr).contains("Relance la même commande"), "{}", texte(&r.stderr));
-    assert_eq!(o.etat_ticket(2).as_deref(), Some("attente"));
+fn max_returns_75_and_the_same_command_resumes_its_ticket() {
+    let o = Orchestra::start("rattachement");
+    o.create("occupant", "windows", 12 * 1024);
+    let args = ["run", "--side", "windows", "--ram", "8G", "--max", "2s", "patient", "--", "echo", "enfin"];
+    let r = o.out(&args);
+    assert_eq!(r.status.code(), Some(75), "{}", text(&r.stderr));
+    assert!(text(&r.stderr).contains("Relance la même commande"), "{}", text(&r.stderr));
+    assert_eq!(o.ticket_state(2).as_deref(), Some("waiting"));
 
-    let relance = o.charge(&args).stderr(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let retry = o.cli(&args).stderr(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(800));
-    assert_eq!(o.etat()["tickets"].as_array().unwrap().len(), 2, "pas de nouveau ticket");
-    o.appel("POST", "/tickets/1/fin", json!({}));
-    let sortie = relance.wait_with_output().unwrap();
-    assert_eq!(sortie.status.code(), Some(0), "{}", texte(&sortie.stderr));
-    assert!(texte(&sortie.stderr).contains("ticket #2 repris"), "{}", texte(&sortie.stderr));
-    assert_eq!(texte(&sortie.stdout).trim(), "enfin");
+    assert_eq!(o.state()["tickets"].as_array().unwrap().len(), 2, "pas de nouveau ticket");
+    o.call("POST", "/tickets/1/release", json!({}));
+    let out = retry.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("ticket #2 repris"), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).trim(), "enfin");
 
-    // `attend --max` : code 75, puis la place est toujours là.
-    o.creer("occupant-2", "windows", 12 * 1024);
-    let d = o.sortie(&["demande", "--cote", "windows", "--ram", "8G", "manuel"]);
-    let id = texte(&d.stdout).trim().to_owned();
-    let a = o.sortie(&["attend", &id, "--max", "1s"]);
+    // `wait --max`: code 75, and the place is still there.
+    o.create("occupant-2", "windows", 12 * 1024);
+    let d = o.out(&["request", "--side", "windows", "--ram", "8G", "manual"]);
+    let id = text(&d.stdout).trim().to_owned();
+    let a = o.out(&["wait", &id, "--max", "1s"]);
     assert_eq!(a.status.code(), Some(75));
-    assert!(texte(&a.stdout).contains(&format!("Relance « charge attend {id} »")), "{}", texte(&a.stdout));
-    assert_eq!(o.etat_ticket(id.parse().unwrap()).as_deref(), Some("attente"));
+    assert!(text(&a.stdout).contains(&format!("Relance « clearway wait {id} »")), "{}", text(&a.stdout));
+    assert_eq!(o.ticket_state(id.parse().unwrap()).as_deref(), Some("waiting"));
 }
 
 #[test]
-fn feu_vert_non_remis_rappele_puis_recupere() {
-    let o = Orchestre::demarrer("rappel");
-    o.creer("occupant", "windows", 12 * 1024);
-    let d = o.sortie(&["demande", "--cote", "windows", "--ram", "8G", "personne n'écoute"]);
-    let id: u64 = texte(&d.stdout).trim().parse().unwrap();
-    o.appel("POST", "/tickets/1/fin", json!({}));
-    assert_eq!(o.etat_ticket(id).as_deref(), Some("actif"));
-    assert!(attendre(Duration::from_secs(8), || o.etat_ticket(id).as_deref() == Some("attente")));
-    assert!(o.journal().contains(&format!("RAPPEL #{id}")), "{}", o.journal());
-    let phrase = o.ticket(id).unwrap()["phrase"].as_str().unwrap().to_owned();
-    assert!(phrase.contains("feu vert rappelé"), "{phrase}");
+fn undelivered_clearance_recalled_then_reclaimed() {
+    let o = Orchestra::start("rappel");
+    o.create("occupant", "windows", 12 * 1024);
+    let d = o.out(&["request", "--side", "windows", "--ram", "8G", "personne n'écoute"]);
+    let id: u64 = text(&d.stdout).trim().parse().unwrap();
+    o.call("POST", "/tickets/1/release", json!({}));
+    assert_eq!(o.ticket_state(id).as_deref(), Some("active"));
+    assert!(wait(Duration::from_secs(8), || o.ticket_state(id).as_deref() == Some("waiting")));
+    assert!(o.log().contains(&format!("RECALLED #{id}")), "{}", o.log());
+    let message = o.ticket(id).unwrap()["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("feu vert rappelé"), "{message}");
 
-    let a = o.sortie(&["attend", &id.to_string(), "--max", "10s"]);
-    assert_eq!(a.status.code(), Some(0), "{}", texte(&a.stdout));
-    assert!(texte(&a.stdout).contains("FEU VERT"));
-    assert!(o.journal().contains(&format!("ACCUSÉ #{id}")), "{}", o.journal());
+    let a = o.out(&["wait", &id.to_string(), "--max", "10s"]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stdout));
+    assert!(text(&a.stdout).contains("FEU VERT"));
+    assert!(o.log().contains(&format!("ACK #{id}")), "{}", o.log());
     std::thread::sleep(Duration::from_secs(4));
-    assert_eq!(o.etat_ticket(id).as_deref(), Some("actif"), "remis : plus de rappel");
+    assert_eq!(o.ticket_state(id).as_deref(), Some("active"), "remis : plus de rappel");
 }
 
-/// Feu vert accordé alors qu'aucun client n'écoute : il attend d'être réclamé.
-fn feu_vert_en_suspens(o: &Orchestre) -> u64 {
-    o.creer("occupant", "windows", 12 * 1024);
-    let (_, t) = o.creer("suivant", "windows", 8 * 1024);
-    assert_eq!(t["etat"], "attente", "{t}");
-    o.appel("POST", "/tickets/1/fin", json!({}));
+/// Clearance granted while no client listens: it waits to be claimed.
+fn pending_clearance(o: &Orchestra) -> u64 {
+    o.create("occupant", "windows", 12 * 1024);
+    let (_, t) = o.create("suivant", "windows", 8 * 1024);
+    assert_eq!(t["state"], "waiting", "{t}");
+    o.call("POST", "/tickets/1/release", json!({}));
     let id = t["id"].as_u64().unwrap();
-    assert_eq!(o.etat_ticket(id).as_deref(), Some("actif"));
+    assert_eq!(o.ticket_state(id).as_deref(), Some("active"));
     id
 }
 
 #[test]
-fn accuse_du_feu_vert() {
-    let reclamer = |nom: &str, accuse: bool| {
-        let o = Orchestre::demarrer(nom);
-        let id = feu_vert_en_suspens(&o);
-        let (code, v) = o.attente_brute(id, accuse);
-        assert_eq!((code, v["etat"].as_str()), (200, Some("actif")), "{v}");
+fn clearance_acknowledgement() {
+    let claim = |name: &str, ack: bool| {
+        let o = Orchestra::start(name);
+        let id = pending_clearance(&o);
+        let (code, v) = o.raw_wait(id, ack);
+        assert_eq!((code, v["state"].as_str()), (200, Some("active")), "{v}");
         (o, id)
     };
-    let (ancien, id_ancien) = reclamer("accuse-ancien", false);
-    let (sans, id_sans) = reclamer("accuse-sans", true);
-    let (avec, id_avec) = reclamer("accuse-avec", true);
-    let ids = [id_ancien, id_sans, id_avec];
-    let (code, r) = avec.appel("POST", &format!("/tickets/{}/recu", ids[2]), Value::Null);
+    let (old, id_old) = claim("accuse-ancien", false);
+    let (without, id_without) = claim("accuse-sans", true);
+    let (with, id_with) = claim("accuse-avec", true);
+    let ids = [id_old, id_without, id_with];
+    let (code, r) = with.call("POST", &format!("/tickets/{}/ack", ids[2]), Value::Null);
     assert_eq!(code, 200, "{r}");
-    assert!(avec.journal().contains(&format!("ACCUSÉ #{}", ids[2])), "{}", avec.journal());
-    let (code, _) = avec.appel("POST", "/tickets/999/recu", Value::Null);
+    assert!(with.log().contains(&format!("ACK #{}", ids[2])), "{}", with.log());
+    let (code, _) = with.call("POST", "/tickets/999/ack", Value::Null);
     assert_eq!(code, 404);
 
-    // Feu vert envoyé, jamais accusé dans delai.rappel (3 s) : repris, place gardée.
-    assert!(attendre(Duration::from_secs(8), || sans.etat_ticket(ids[1]).as_deref() == Some("attente")));
-    assert!(sans.journal().contains(&format!("RAPPEL #{}", ids[1])), "{}", sans.journal());
-    let (code, r) = sans.appel("POST", &format!("/tickets/{}/recu", ids[1]), Value::Null);
+    // Clearance sent, never acknowledged within delay.recall (3 s): taken back, place kept.
+    assert!(wait(Duration::from_secs(8), || without.ticket_state(ids[1]).as_deref() == Some("waiting")));
+    assert!(without.log().contains(&format!("RECALLED #{}", ids[1])), "{}", without.log());
+    let (code, r) = without.call("POST", &format!("/tickets/{}/ack", ids[1]), Value::Null);
     assert_eq!(code, 409, "{r}");
-    assert!(r["erreur"].as_str().unwrap().contains("charge attend"), "{r}");
+    assert!(r["error"].as_str().unwrap().contains("clearway wait"), "{r}");
 
-    // L'ancien client (réponse = remise) et l'accusé gardent leur feu vert ; sans signal de présence, ils
-    // finissent orphelins, ce qui suppose un feu vert remis.
+    // The old client (response = delivery) and the acknowledged one keep their clearance; without presence they
+    // end up orphaned, which implies a delivered clearance.
     std::thread::sleep(Duration::from_secs(2));
-    for (o, id) in [(&ancien, ids[0]), (&avec, ids[2])] {
-        let etat = o.etat_ticket(id);
-        assert!(matches!(etat.as_deref(), Some("actif" | "orphelin")), "{etat:?}");
-        assert!(!o.journal().contains(&format!("RAPPEL #{id}")), "{}", o.journal());
+    for (o, id) in [(&old, ids[0]), (&with, ids[2])] {
+        let state = o.ticket_state(id);
+        assert!(matches!(state.as_deref(), Some("active" | "orphaned")), "{state:?}");
+        assert!(!o.log().contains(&format!("RECALLED #{id}")), "{}", o.log());
     }
 }
 
 #[test]
-fn bail_manuel_puis_prolongation() {
-    let o = Orchestre::demarrer("bail");
-    let d = o.sortie(&["demande", "--cote", "windows", "--ram", "1G", "--duree", "2s", "court"]);
-    let id = texte(&d.stdout).trim().to_owned();
+fn manual_lease_then_extension() {
+    let o = Orchestra::start("bail");
+    let d = o.out(&["request", "--side", "windows", "--ram", "1G", "--duration", "2s", "court"]);
+    let id = text(&d.stdout).trim().to_owned();
     let n: u64 = id.parse().unwrap();
 
-    // Bail dépassé : toujours actif et réservé, la file continue.
-    assert!(attendre(Duration::from_secs(8), || o.journal().contains(&format!("BAIL DÉPASSÉ #{id}"))), "{}", o.journal());
+    // Lease overrun: still active and reserved, the queue goes on.
+    assert!(wait(Duration::from_secs(8), || o.log().contains(&format!("LEASE OVERRUN #{id}"))), "{}", o.log());
     let t = o.ticket(n).unwrap();
-    assert_eq!((t["etat"].as_str(), &t["bail_depasse"]), (Some("actif"), &json!(true)), "{t}");
-    assert!(t["phrase"].as_str().unwrap().contains(&format!("charge prolonge {id}")), "{t}");
-    let (_, pendant) = o.creer("pendant", "windows", 1024);
-    assert_eq!(pendant["etat"], "actif", "{pendant}");
-    o.appel("POST", &format!("/tickets/{}/fin", pendant["id"]), json!({}));
-    let s = texte(&o.sortie(&["statut"]).stdout);
+    assert_eq!((t["state"].as_str(), &t["lease_overrun"]), (Some("active"), &json!(true)), "{t}");
+    assert!(t["message"].as_str().unwrap().contains(&format!("clearway extend {id}")), "{t}");
+    let (_, during) = o.create("pendant", "windows", 1024);
+    assert_eq!(during["state"], "active", "{during}");
+    o.call("POST", &format!("/tickets/{}/release", during["id"]), json!({}));
+    let s = text(&o.out(&["status"]).stdout);
     assert!(s.contains("(bail dépassé)"), "{s}");
 
-    // Sans nouvelle pendant delai.absence (8 s) après l'échéance : orphelin, admissions gelées.
-    assert!(attendre(Duration::from_secs(14), || o.etat_ticket(n).as_deref() == Some("orphelin")));
-    assert!(o.journal().contains(&format!("BAIL ÉCHU #{id}")), "{}", o.journal());
-    let (_, b) = o.creer("suivant", "windows", 1024);
-    assert_eq!(b["raison"]["decision"], "gel");
-    assert!(b["raison"]["phrase"].as_str().unwrap().contains("bail échu"), "{b}");
+    // No news for delay.absence (8 s) after the deadline: orphaned, admissions frozen.
+    assert!(wait(Duration::from_secs(14), || o.ticket_state(n).as_deref() == Some("orphaned")));
+    assert!(o.log().contains(&format!("LEASE EXPIRED #{id}")), "{}", o.log());
+    let (_, b) = o.create("suivant", "windows", 1024);
+    assert_eq!(b["reason"]["decision"], "frozen");
+    assert!(b["reason"]["message"].as_str().unwrap().contains("bail échu"), "{b}");
 
-    let p = o.sortie(&["prolonge", &id, "10m", "tests plus longs que prévu"]);
-    assert_eq!(p.status.code(), Some(0), "{}", texte(&p.stderr));
-    assert!(texte(&p.stdout).contains("prolongé de 10 min"), "{}", texte(&p.stdout));
-    assert_eq!(o.etat_ticket(id.parse().unwrap()).as_deref(), Some("actif"));
-    assert!(o.journal().contains("tests plus longs que prévu"));
-    let (_, gros) = o.creer("gros", "windows", 15 * 1024);
-    assert_eq!(gros["etat"], "attente");
-    let r = o.sortie(&["prolonge", &gros["id"].to_string(), "5m", "pas encore actif"]);
+    let p = o.out(&["extend", &id, "10m", "tests plus longs que prévu"]);
+    assert_eq!(p.status.code(), Some(0), "{}", text(&p.stderr));
+    assert!(text(&p.stdout).contains("prolongé de 10 min"), "{}", text(&p.stdout));
+    assert_eq!(o.ticket_state(id.parse().unwrap()).as_deref(), Some("active"));
+    assert!(o.log().contains("tests plus longs que prévu"));
+    let (_, big) = o.create("gros", "windows", 15 * 1024);
+    assert_eq!(big["state"], "waiting");
+    let r = o.out(&["extend", &big["id"].to_string(), "5m", "pas encore actif"]);
     assert_eq!(r.status.code(), Some(2));
-    assert!(texte(&r.stderr).contains("rien à prolonger"), "{}", texte(&r.stderr));
+    assert!(text(&r.stderr).contains("rien à prolonger"), "{}", text(&r.stderr));
 }
 
 #[test]
-fn gel_manuel() {
-    let o = Orchestre::demarrer("gel");
-    let (code, g) = o.appel("POST", "/gel", json!({ "gele": true }));
+fn manual_freeze() {
+    let o = Orchestra::start("gel");
+    let (code, g) = o.call("POST", "/freeze", json!({ "frozen": true }));
     assert_eq!(code, 200, "{g}");
-    let (_, a) = o.creer("a", "windows", 1024);
-    assert_eq!(a["raison"]["decision"], "gel");
-    assert!(a["raison"]["phrase"].as_str().unwrap().contains("gel manuel"), "{a}");
-    assert!(texte(&o.sortie(&["statut"]).stdout).contains("File gelée à la main"));
-    o.appel("POST", "/gel", json!({ "gele": false }));
-    assert_eq!(o.etat_ticket(1).as_deref(), Some("actif"));
-    assert!(o.journal().contains("GEL MANUEL") && o.journal().contains("DÉGEL MANUEL"));
+    let (_, a) = o.create("a", "windows", 1024);
+    assert_eq!(a["reason"]["decision"], "frozen");
+    assert!(a["reason"]["message"].as_str().unwrap().contains("gel manuel"), "{a}");
+    assert!(text(&o.out(&["status"]).stdout).contains("File gelée à la main"));
+    o.call("POST", "/freeze", json!({ "frozen": false }));
+    assert_eq!(o.ticket_state(1).as_deref(), Some("active"));
+    assert!(o.log().contains("MANUAL FREEZE") && o.log().contains("MANUAL UNFREEZE"));
 }
 
 #[test]
-fn orphelin_gele_puis_revient_au_signal() {
-    let o = Orchestre::demarrer("orphelin");
-    let (_, a) = o.creer("a", "windows", 1024);
-    assert_eq!(a["etat"], "actif");
-    assert!(attendre(Duration::from_secs(8), || o.etat_ticket(1).as_deref() == Some("orphelin")));
-    let (_, b) = o.creer("b", "windows", 1024);
-    assert_eq!(b["etat"], "attente");
-    assert_eq!(b["raison"]["decision"], "gel");
-    assert!(b["raison"]["phrase"].as_str().unwrap().contains("ticket #1 orphelin"), "{b}");
+fn orphan_freezes_then_comes_back_on_signal() {
+    let o = Orchestra::start("orphelin");
+    let (_, a) = o.create("a", "windows", 1024);
+    assert_eq!(a["state"], "active");
+    assert!(wait(Duration::from_secs(8), || o.ticket_state(1).as_deref() == Some("orphaned")));
+    let (_, b) = o.create("b", "windows", 1024);
+    assert_eq!(b["state"], "waiting");
+    assert_eq!(b["reason"]["decision"], "frozen");
+    assert!(b["reason"]["message"].as_str().unwrap().contains("ticket #1 orphelin"), "{b}");
 
-    let (code, p) = o.appel("POST", "/tickets/1/presence", json!({}));
+    let (code, p) = o.call("POST", "/tickets/1/presence", json!({}));
     assert_eq!(code, 200);
-    assert_eq!(p["etat"], "actif");
-    assert_eq!(o.etat_ticket(2).as_deref(), Some("actif"));
-    assert!(o.journal().contains("ORPHELIN #1") && o.journal().contains("RETOUR #1"));
+    assert_eq!(p["state"], "active");
+    assert_eq!(o.ticket_state(2).as_deref(), Some("active"));
+    assert!(o.log().contains("ORPHANED #1") && o.log().contains("BACK #1"));
 }
 
 #[test]
-fn superviseur_tue_pendant_la_tache() {
-    let o = Orchestre::demarrer("superviseur");
+fn supervisor_killed_during_task() {
+    let o = Orchestra::start("superviseur");
     let mut run = o
-        .charge(&["run", "--cote", "windows", "--ram", "1G", "long", "--", "sleep", "30"])
+        .cli(&["run", "--side", "windows", "--ram", "1G", "long", "--", "sleep", "30"])
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    assert!(attendre(Duration::from_secs(5), || o.etat_ticket(1).as_deref() == Some("actif")));
+    assert!(wait(Duration::from_secs(5), || o.ticket_state(1).as_deref() == Some("active")));
     unsafe { libc::kill(run.id() as i32, libc::SIGKILL) };
     let _ = run.wait();
-    assert!(attendre(Duration::from_secs(8), || o.etat_ticket(1).as_deref() == Some("orphelin")));
+    assert!(wait(Duration::from_secs(8), || o.ticket_state(1).as_deref() == Some("orphaned")));
     let _ = Command::new("pkill").args(["-f", "^sleep 30$"]).status();
-    assert_eq!(o.sortie(&["annule", "1"]).status.code(), Some(0));
+    assert_eq!(o.out(&["cancel", "1"]).status.code(), Some(0));
 }
 
 #[test]
-fn signal_au_superviseur_arrete_la_commande_et_declare_la_fin() {
-    let o = Orchestre::demarrer("signal");
+fn signal_to_supervisor_stops_command_and_reports_release() {
+    let o = Orchestra::start("signal");
     let mut run = o
-        .charge(&["run", "--cote", "windows", "--ram", "1G", "long", "--", "sleep", "40"])
+        .cli(&["run", "--side", "windows", "--ram", "1G", "long", "--", "sleep", "40"])
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    assert!(attendre(Duration::from_secs(5), || o.etat_ticket(1).as_deref() == Some("actif")));
+    assert!(wait(Duration::from_secs(5), || o.ticket_state(1).as_deref() == Some("active")));
     unsafe { libc::kill(run.id() as i32, libc::SIGTERM) };
-    let statut = run.wait().unwrap();
-    assert_eq!(statut.code(), Some(128 + libc::SIGTERM));
-    assert!(o.etat()["tickets"].as_array().unwrap().is_empty());
-    assert!(o.journal().contains("FIN #1"), "{}", o.journal());
+    let status_view = run.wait().unwrap();
+    assert_eq!(status_view.code(), Some(128 + libc::SIGTERM));
+    assert!(o.state()["tickets"].as_array().unwrap().is_empty());
+    assert!(o.log().contains("RELEASED #1"), "{}", o.log());
 }
 
 #[test]
-fn attente_sans_client_sautee_puis_retiree() {
-    let o = Orchestre::demarrer("expiration");
-    o.creer("gros", "windows", 15 * 1024);
-    let (_, b) = o.creer("petit", "windows", 4 * 1024);
-    assert_eq!(b["etat"], "attente");
-    assert!(attendre(Duration::from_secs(8), || {
-        o.ticket(2).is_some_and(|t| t["phrase"].as_str().unwrap().contains("aucun client ne l'attend"))
+fn unattended_wait_skipped_then_removed() {
+    let o = Orchestra::start("expiration");
+    o.create("gros", "windows", 15 * 1024);
+    let (_, b) = o.create("petit", "windows", 4 * 1024);
+    assert_eq!(b["state"], "waiting");
+    assert!(wait(Duration::from_secs(8), || {
+        o.ticket(2).is_some_and(|t| t["message"].as_str().unwrap().contains("aucun client ne l'attend"))
     }));
-    assert!(attendre(Duration::from_secs(10), || o.etat_ticket(2).is_none()));
-    assert!(o.journal().contains("EXPIRÉ #2"));
+    assert!(wait(Duration::from_secs(10), || o.ticket_state(2).is_none()));
+    assert!(o.log().contains("EXPIRED #2"));
 }
 
 #[test]
-fn reprise_apres_arret_brutal_et_epoque() {
-    let mut o = Orchestre::demarrer("reprise");
-    let (_, a) = o.creer("a", "windows", 12 * 1024);
-    assert_eq!(a["epoque"], 1);
+fn resume_after_hard_stop_and_epoch() {
+    let mut o = Orchestra::start("reprise");
+    let (_, a) = o.create("a", "windows", 12 * 1024);
+    assert_eq!(a["epoch"], 1);
     let run = o
-        .charge(&["run", "--cote", "windows", "--ram", "8G", "après reprise", "--", "true"])
+        .cli(&["run", "--side", "windows", "--ram", "8G", "après reprise", "--", "true"])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    assert!(attendre(Duration::from_secs(5), || o.etat_ticket(2).as_deref() == Some("attente")));
-    o.tuer();
-    let sur_disque: Value = serde_json::from_slice(&std::fs::read(o.dossier.join("etat.json")).unwrap()).unwrap();
-    assert_eq!(sur_disque["tickets"].as_array().unwrap().len(), 2);
-    o.lancer();
-    assert_eq!(o.etat()["epoque"], 2);
-    assert_eq!(o.etat_ticket(1).as_deref(), Some("actif"));
-    // Le client de l'époque 1 rouvre un relais et obtient le feu vert sur la nouvelle instance.
-    o.appel("POST", "/tickets/1/fin", json!({"code": 0}));
-    let sortie = run.wait_with_output().unwrap();
-    assert_eq!(sortie.status.code(), Some(0), "{}", texte(&sortie.stderr));
-    assert!(o.journal().contains("DÉMARRAGE époque 2"), "{}", o.journal());
+    assert!(wait(Duration::from_secs(5), || o.ticket_state(2).as_deref() == Some("waiting")));
+    o.kill();
+    let on_disk: Value = serde_json::from_slice(&std::fs::read(o.dir.join("state.json")).unwrap()).unwrap();
+    assert_eq!(on_disk["tickets"].as_array().unwrap().len(), 2);
+    o.launch();
+    assert_eq!(o.state()["epoch"], 2);
+    assert_eq!(o.ticket_state(1).as_deref(), Some("active"));
+    // The epoch 1 client opens a new relay and gets its clearance from the new instance.
+    o.call("POST", "/tickets/1/release", json!({"code": 0}));
+    let out = run.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(o.log().contains("START époque 2"), "{}", o.log());
 }
 
 #[test]
-fn deuxieme_instance_et_arret_par_le_tube() {
-    let mut o = Orchestre::demarrer("instances");
-    let statut = o.processus().status().unwrap();
-    assert_eq!(statut.code(), Some(3));
-    assert!(o.journal().contains("INFO Déjà lancé"), "{}", o.journal());
-    assert!(!o.journal().contains("ERREUR Déjà lancé"));
-    let (code, _) = o.appel("POST", "/quitter", Value::Null);
+fn second_instance_and_stop_through_the_pipe() {
+    let mut o = Orchestra::start("instances");
+    let status_view = o.process().status().unwrap();
+    assert_eq!(status_view.code(), Some(3));
+    assert!(o.log().contains("INFO Déjà lancé"), "{}", o.log());
+    assert!(!o.log().contains("ERROR"));
+    let (code, _) = o.call("POST", "/quit", Value::Null);
     assert_eq!(code, 200);
-    let mut e = o.enfant.take().unwrap();
-    assert!(attendre(Duration::from_secs(5), || matches!(e.try_wait(), Ok(Some(s)) if s.success())));
-    assert!(o.journal().contains("ARRÊT"));
-    assert!(!o.repond());
+    let mut e = o.child.take().unwrap();
+    assert!(wait(Duration::from_secs(5), || matches!(e.try_wait(), Ok(Some(s)) if s.success())));
+    assert!(o.log().contains("STOP"));
+    assert!(!o.answers());
 }
 
 #[test]
-fn idempotence_de_la_creation() {
-    let o = Orchestre::demarrer("idempotence");
-    let (c1, a) = o.creer("meme-requete", "windows", 1024);
-    let (c2, b) = o.creer("meme-requete", "windows", 1024);
+fn creation_idempotence() {
+    let o = Orchestra::start("idempotence");
+    let (c1, a) = o.create("meme-requete", "windows", 1024);
+    let (c2, b) = o.create("meme-requete", "windows", 1024);
     assert_eq!((c1, c2), (201, 200));
     assert_eq!(a["id"], b["id"]);
-    let (_, c) = o.creer("autre-requete", "windows", 1024);
+    let (_, c) = o.create("autre-requete", "windows", 1024);
     assert_ne!(a["id"], c["id"]);
 }
 
 #[test]
-fn arret_de_wsl_libere_les_tickets_wsl() {
-    let o = Orchestre::demarrer("wsl-arrete");
-    let (_, a) = o.creer("wsl", "wsl", 1024);
-    assert_eq!(a["etat"], "actif");
-    let (_, b) = o.creer("win", "windows", 1024);
-    assert_eq!(b["etat"], "actif");
+fn wsl_stop_frees_wsl_tickets() {
+    let o = Orchestra::start("wsl-arrete");
+    let (_, a) = o.create("wsl", "wsl", 1024);
+    assert_eq!(a["state"], "active");
+    let (_, b) = o.create("win", "windows", 1024);
+    assert_eq!(b["state"], "active");
     std::fs::write(
-        o.dossier.join("mesures-test.json"),
-        r#"{"ram_totale_mo":32768,"ram_dispo_mo":20480,"commit_mo":0,"commit_limite_mo":0,"cpu_pct":0.0,"vmmem":null}"#,
+        o.dir.join("measures-test.json"),
+        r#"{"ram_total_mb":32768,"ram_avail_mb":20480,"commit_mb":0,"commit_limit_mb":0,"cpu_pct":0.0,"vmmem":null}"#,
     )
     .unwrap();
-    assert!(attendre(Duration::from_secs(6), || o.etat_ticket(1).is_none()));
-    assert!(o.etat_ticket(2).is_some());
-    assert!(o.journal().contains("LIBÉRÉ #1"));
-    let s = texte(&o.sortie(&["statut"]).stdout);
+    assert!(wait(Duration::from_secs(6), || o.ticket_state(1).is_none()));
+    assert!(o.ticket_state(2).is_some());
+    assert!(o.log().contains("FREED #1"));
+    let s = text(&o.out(&["status"]).stdout);
     assert!(s.contains("WSL : arrêté"), "{s}");
 }
 
 #[test]
-fn relais_absent_puis_lancement_automatique() {
-    let o = Orchestre::preparer("lancement");
-    let r = Command::new(env!("CARGO_BIN_EXE_orchestrateur")).args(["relais", "--tube", &o.tube]).output().unwrap();
-    assert_eq!(r.status.code(), Some(RELAIS_ABSENT));
-    assert!(texte(&r.stderr).contains("orchestrateur absent"), "{}", texte(&r.stderr));
+fn relay_absent_then_automatic_launch() {
+    let o = Orchestra::prepare("lancement");
+    let r = Command::new(env!("CARGO_BIN_EXE_clearway")).args(["relay", "--pipe", &o.pipe]).output().unwrap();
+    assert_eq!(r.status.code(), Some(RELAY_ABSENT));
+    assert!(text(&r.stderr).contains("relay: Clearway is not running"), "{}", text(&r.stderr));
 
-    let s = o.sortie(&["statut"]);
-    assert_eq!(s.status.code(), Some(0), "{}", texte(&s.stderr));
-    assert!(texte(&s.stderr).contains("orchestrateur absent, lancement"), "{}", texte(&s.stderr));
-    assert!(texte(&s.stdout).contains("File vide"));
-    let (code, _) = o.appel("POST", "/quitter", Value::Null);
+    let s = o.out(&["status"]);
+    assert_eq!(s.status.code(), Some(0), "{}", text(&s.stderr));
+    assert!(text(&s.stderr).contains("Clearway absent, lancement"), "{}", text(&s.stderr));
+    assert!(text(&s.stdout).contains("File vide"));
+    let (code, _) = o.call("POST", "/quit", Value::Null);
     assert_eq!(code, 200);
-    assert!(attendre(Duration::from_secs(5), || !o.repond()));
+    assert!(wait(Duration::from_secs(5), || !o.answers()));
 }
 
 #[test]
-fn orchestrateur_injoignable() {
-    let o = Orchestre::preparer("injoignable");
-    let debut = Instant::now();
-    let r = o.charge(&["statut"]).env("CHARGE_EXE", "/bin/false").env("CHARGE_PATIENCE", "6").output().unwrap();
+fn clearway_unreachable() {
+    let o = Orchestra::prepare("injoignable");
+    let began = Instant::now();
+    let r = o.cli(&["status"]).env("CLEARWAY_EXE", "/bin/false").env("CLEARWAY_PATIENCE", "6").output().unwrap();
     assert_eq!(r.status.code(), Some(2));
-    assert!(debut.elapsed() >= Duration::from_secs(3));
-    let e = texte(&r.stderr);
+    assert!(began.elapsed() >= Duration::from_secs(3));
+    let e = text(&r.stderr);
     assert!(e.contains("nouvel essai dans 1 s") && e.contains("nouvel essai dans 2 s"), "délai croissant : {e}");
-    assert!(e.contains("orchestrateur injoignable depuis"), "{e}");
+    assert!(e.contains("Clearway injoignable depuis"), "{e}");
 }
 
-/// Imite `orchestrateur.exe` quand l'interop WSL cale : les `echecs` premiers lancements échouent comme le 05/11 à 21:45.
-fn faux_exe(o: &Orchestre, echecs: u32) -> PathBuf {
-    let chemin = o.dossier.join("faux-exe.sh");
-    let compteur = o.dossier.join("lancements");
-    let _ = std::fs::remove_file(&compteur);
+/// Mimics `clearway.exe` when WSL interop stalls: the first `failures` launches fail with the real interop error.
+fn fake_exe(o: &Orchestra, failures: u32) -> PathBuf {
+    let path = o.dir.join("faux-exe.sh");
+    let counter = o.dir.join("lancements");
+    let _ = std::fs::remove_file(&counter);
     std::fs::write(
-        &chemin,
+        &path,
         format!(
-            "#!/bin/sh\nn=$(cat '{c}' 2>/dev/null || echo 0)\necho $((n + 1)) > '{c}'\nif [ \"$n\" -lt {echecs} ]; then\n  echo 'WSL ERROR: UtilAcceptVsock:281: accept4 failed 110' >&2\n  exit 1\nfi\nexec '{vrai}' \"$@\"\n",
-            c = compteur.display(),
-            vrai = env!("CARGO_BIN_EXE_orchestrateur")
+            "#!/bin/sh\nn=$(cat '{c}' 2>/dev/null || echo 0)\necho $((n + 1)) > '{c}'\nif [ \"$n\" -lt {failures} ]; then\n  echo 'WSL ERROR: UtilAcceptVsock:281: accept4 failed 110' >&2\n  exit 1\nfi\nexec '{real}' \"$@\"\n",
+            c = counter.display(),
+            real = env!("CARGO_BIN_EXE_clearway")
         ),
     )
     .unwrap();
-    Command::new("chmod").arg("+x").arg(&chemin).status().unwrap();
-    chemin
+    Command::new("chmod").arg("+x").arg(&path).status().unwrap();
+    path
 }
 
 #[test]
-fn interop_qui_cale_puis_revient() {
-    let o = Orchestre::demarrer("interop");
-    let exe = faux_exe(&o, 2);
-    let r = o.charge(&["statut"]).env("CHARGE_EXE", &exe).output().unwrap();
-    assert_eq!(r.status.code(), Some(0), "{}", texte(&r.stderr));
-    let e = texte(&r.stderr);
+fn interop_stalls_then_comes_back() {
+    let o = Orchestra::start("interop");
+    let exe = fake_exe(&o, 2);
+    let r = o.cli(&["status"]).env("CLEARWAY_EXE", &exe).output().unwrap();
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    let e = text(&r.stderr);
     assert!(e.contains("interop WSL indisponible (WSL ERROR: UtilAcceptVsock"), "{e}");
     assert!(e.contains("nouvel essai dans 1 s") && e.contains("nouvel essai dans 2 s"), "{e}");
 
-    // En attente, la coupure ne fait pas lâcher le ticket : le client se rattache et reçoit son feu vert.
-    o.creer("occupant", "windows", 12 * 1024);
-    let d = o.sortie(&["demande", "--cote", "windows", "--ram", "8G", "patient"]);
-    let id = texte(&d.stdout).trim().to_owned();
-    let exe = faux_exe(&o, 0);
-    let attente = o.charge(&["attend", &id, "--max", "1m"]).env("CHARGE_EXE", &exe).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    // While waiting, the outage does not drop the ticket: the client reattaches and gets its clearance.
+    o.create("occupant", "windows", 12 * 1024);
+    let d = o.out(&["request", "--side", "windows", "--ram", "8G", "patient"]);
+    let id = text(&d.stdout).trim().to_owned();
+    let exe = fake_exe(&o, 0);
+    let waiting = o.cli(&["wait", &id, "--max", "1m"]).env("CLEARWAY_EXE", &exe).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(800));
-    // L'interop cale pendant que le client attend : son relais meurt, les 2 relances suivantes échouent.
-    std::fs::write(o.dossier.join("lancements"), "-2").unwrap();
-    let _ = Command::new("pkill").args(["-f", &format!("relais --tube {}", o.tube)]).status();
+    // Interop stalls while the client waits: its relay dies, the next 2 launches fail.
+    std::fs::write(o.dir.join("lancements"), "-2").unwrap();
+    let _ = Command::new("pkill").args(["-f", &format!("relay --pipe {}", o.pipe)]).status();
     std::thread::sleep(Duration::from_secs(1));
-    o.appel("POST", "/tickets/1/fin", json!({}));
-    let sortie = attente.wait_with_output().unwrap();
-    assert_eq!(sortie.status.code(), Some(0), "{}\n{}", texte(&sortie.stdout), texte(&sortie.stderr));
-    assert!(texte(&sortie.stdout).contains("FEU VERT"), "{}", texte(&sortie.stdout));
-    assert!(texte(&sortie.stderr).contains("interop WSL indisponible"), "{}", texte(&sortie.stderr));
+    o.call("POST", "/tickets/1/release", json!({}));
+    let out = waiting.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}\n{}", text(&out.stdout), text(&out.stderr));
+    assert!(text(&out.stdout).contains("FEU VERT"), "{}", text(&out.stdout));
+    assert!(text(&out.stderr).contains("interop WSL indisponible"), "{}", text(&out.stderr));
 }
 
 #[test]
-fn dossier_et_branche_du_ticket() {
-    let o = Orchestre::demarrer("lieu");
-    let depot = o.dossier.join("depot-essai");
-    std::fs::create_dir_all(&depot).unwrap();
-    let git = |dans: &std::path::Path, args: &[&str]| {
-        let s = Command::new("git").current_dir(dans).args(args).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+fn ticket_dir_and_branch() {
+    let o = Orchestra::start("lieu");
+    let repo = o.dir.join("depot-essai");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |inside: &std::path::Path, args: &[&str]| {
+        let s = Command::new("git").current_dir(inside).args(args).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
-        assert!(s.status.success(), "git {args:?} : {}", texte(&s.stderr));
+        assert!(s.status.success(), "git {args:?} : {}", text(&s.stderr));
     };
-    git(&depot, &["init", "-q", "-b", "principale"]);
-    git(&depot, &["commit", "-q", "--allow-empty", "-m", "départ"]);
-    git(&depot, &["worktree", "add", "-q", "-b", "feat/essai", "../arbre-essai"]);
-    std::fs::create_dir_all(depot.join("sous/dossier")).unwrap();
+    git(&repo, &["init", "-q", "-b", "principale"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "départ"]);
+    git(&repo, &["worktree", "add", "-q", "-b", "feat/essai", "../arbre-essai"]);
+    std::fs::create_dir_all(repo.join("sous/dossier")).unwrap();
 
-    let d = o.charge(&["demande", "--cote", "windows", "--ram", "1G", "dans le dépôt"]).current_dir(depot.join("sous/dossier")).output().unwrap();
-    assert_eq!(d.status.code(), Some(0), "{}", texte(&d.stderr));
-    let d = o.charge(&["demande", "--cote", "windows", "--ram", "1G", "dans le worktree"]).current_dir(o.dossier.join("arbre-essai")).output().unwrap();
-    assert_eq!(d.status.code(), Some(0), "{}", texte(&d.stderr));
-    let d = o.charge(&["demande", "--cote", "windows", "--ram", "1G", "hors git"]).current_dir("/").env_remove("CHARGE_SESSION").output().unwrap();
-    assert_eq!(d.status.code(), Some(0), "{}", texte(&d.stderr));
+    let d = o.cli(&["request", "--side", "windows", "--ram", "1G", "dans le dépôt"]).current_dir(repo.join("sous/dossier")).output().unwrap();
+    assert_eq!(d.status.code(), Some(0), "{}", text(&d.stderr));
+    let d = o.cli(&["request", "--side", "windows", "--ram", "1G", "dans le worktree"]).current_dir(o.dir.join("arbre-essai")).output().unwrap();
+    assert_eq!(d.status.code(), Some(0), "{}", text(&d.stderr));
+    let d = o.cli(&["request", "--side", "windows", "--ram", "1G", "hors git"]).current_dir("/").env_remove("CLEARWAY_SESSION").output().unwrap();
+    assert_eq!(d.status.code(), Some(0), "{}", text(&d.stderr));
 
-    let s = texte(&o.sortie(&["statut"]).stdout);
+    let s = text(&o.out(&["status"]).stdout);
     assert!(s.contains("[test] depot-essai · principale : dans le dépôt"), "{s}");
     assert!(s.contains("[test] arbre-essai · arbre-essai (branche feat/essai) : dans le worktree"), "{s}");
     assert!(s.contains("[—] / : hors git"), "{s}");
 }
 
 #[test]
-fn maintenance_en_cours_pas_de_lancement() {
-    let o = Orchestre::preparer("maintenance");
-    let fichier = o.dossier.join("maintenance");
-    std::fs::write(&fichier, "").unwrap();
-    let r = o.charge(&["statut"]).env("CHARGE_PATIENCE", "4").output().unwrap();
+fn maintenance_in_progress_no_launch() {
+    let o = Orchestra::prepare("maintenance");
+    let file = o.dir.join("maintenance");
+    std::fs::write(&file, "").unwrap();
+    let r = o.cli(&["status"]).env("CLEARWAY_PATIENCE", "4").output().unwrap();
     assert_eq!(r.status.code(), Some(2));
-    let e = texte(&r.stderr);
-    assert!(e.contains("orchestrateur en cours de mise à jour, nouvel essai dans 1 s"), "{e}");
+    let e = text(&r.stderr);
+    assert!(e.contains("Clearway en cours de mise à jour, nouvel essai dans 1 s"), "{e}");
     assert!(!e.contains("lancement"), "pas de lancement pendant la maintenance : {e}");
-    assert!(!o.repond());
+    assert!(!o.answers());
 
-    // Un fichier vieux de plus de 5 min est ignoré : le client lance l'orchestrateur.
-    let ok = Command::new("touch").args(["-d", "-6 minutes"]).arg(&fichier).status().unwrap();
+    // A file older than 5 min is ignored: the client launches Clearway.
+    let ok = Command::new("touch").args(["-d", "-6 minutes"]).arg(&file).status().unwrap();
     assert!(ok.success());
-    let r = o.sortie(&["statut"]);
-    assert_eq!(r.status.code(), Some(0), "{}", texte(&r.stderr));
-    assert!(texte(&r.stderr).contains("orchestrateur absent, lancement"));
-    let (code, _) = o.appel("POST", "/quitter", Value::Null);
+    let r = o.out(&["status"]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert!(text(&r.stderr).contains("Clearway absent, lancement"));
+    let (code, _) = o.call("POST", "/quit", Value::Null);
     assert_eq!(code, 200);
-    assert!(attendre(Duration::from_secs(5), || !o.repond()));
+    assert!(wait(Duration::from_secs(5), || !o.answers()));
 }
 
 #[test]
-fn nom_de_session_claude_ou_codex() {
-    let o = Orchestre::demarrer("session");
-    let maison = o.dossier.join("maison");
-    std::fs::create_dir_all(maison.join(".claude/sessions")).unwrap();
-    std::fs::write(maison.join(".claude/sessions/4242.json"), r#"{"pid":4242,"name":"RDEV APP","kind":"interactive"}"#).unwrap();
-    std::fs::write(maison.join(".claude/sessions/4343.json"), "pas du json").unwrap();
-    let demande = |pid: &str, codex: Option<&str>, quoi: &str| {
-        let mut c = o.charge(&["demande", "--cote", "windows", "--ram", "1G", quoi]);
-        c.env_remove("CHARGE_SESSION").env("HOME", &maison).env("CLAUDE_PID", pid).env_remove("CODEX_THREAD_ID");
+fn claude_or_codex_session_name() {
+    let o = Orchestra::start("session");
+    let home = o.dir.join("maison");
+    std::fs::create_dir_all(home.join(".claude/sessions")).unwrap();
+    std::fs::write(home.join(".claude/sessions/4242.json"), r#"{"pid":4242,"name":"RDEV APP","kind":"interactive"}"#).unwrap();
+    std::fs::write(home.join(".claude/sessions/4343.json"), "pas du json").unwrap();
+    let request_cmd = |pid: &str, codex: Option<&str>, what: &str| {
+        let mut c = o.cli(&["request", "--side", "windows", "--ram", "1G", what]);
+        c.env_remove("CLEARWAY_SESSION").env("HOME", &home).env("CLAUDE_PID", pid).env_remove("CODEX_THREAD_ID");
         if let Some(id) = codex {
             c.env("CODEX_THREAD_ID", id).env_remove("CLAUDE_PID");
         }
         let s = c.output().unwrap();
-        assert_eq!(s.status.code(), Some(0), "{}", texte(&s.stderr));
+        assert_eq!(s.status.code(), Some(0), "{}", text(&s.stderr));
     };
-    demande("4242", None, "nom lu");
-    demande("4343", None, "fichier illisible");
-    demande("9999", None, "fichier absent");
-    demande("", Some("019a2b3c-4d5e-6f70"), "codex");
-    let s = texte(&o.sortie(&["statut"]).stdout);
+    request_cmd("4242", None, "nom lu");
+    request_cmd("4343", None, "fichier illisible");
+    request_cmd("9999", None, "fichier absent");
+    request_cmd("", Some("019a2b3c-4d5e-6f70"), "codex");
+    let s = text(&o.out(&["status"]).stdout);
     assert!(s.contains("[RDEV APP]") && s.contains(": nom lu"), "{s}");
     assert!(s.lines().any(|l| l.contains("[—]") && l.contains("fichier illisible")), "{s}");
     assert!(s.lines().any(|l| l.contains("[—]") && l.contains("fichier absent")), "{s}");
@@ -712,134 +714,232 @@ fn nom_de_session_claude_ou_codex() {
 }
 
 #[test]
-fn multiplexage_par_id_et_ancien_mode() {
-    let o = Orchestre::demarrer("multiplexage");
-    o.creer("occupant", "windows", 12 * 1024);
-    let (_, t) = o.creer("patient", "windows", 8 * 1024);
+fn multiplexing_by_id_and_legacy_mode() {
+    let o = Orchestra::start("multiplexage");
+    o.create("occupant", "windows", 12 * 1024);
+    let (_, t) = o.create("patient", "windows", 8 * 1024);
     let id = t["id"].as_u64().unwrap();
-    let mut l = Ligne::ouvrir(&o);
-    let debut = Instant::now();
-    let parametres = json!({ "connu": cle(&t["raison"]), "delai_s": "2" });
-    l.envoyer(json!({ "id": 2, "methode": "GET", "chemin": format!("/tickets/{id}/attente"), "parametres": parametres }));
-    l.envoyer(json!({ "id": 3, "methode": "GET", "chemin": "/etat" }));
-    let a = l.lire();
+    let mut l = Line::open(&o);
+    let began = Instant::now();
+    let params = json!({ "known": key(&t["reason"]), "timeout_s": "2" });
+    l.send(json!({ "id": 2, "method": "GET", "path": format!("/tickets/{id}/wait"), "params": params }));
+    l.send(json!({ "id": 3, "method": "GET", "path": "/status" }));
+    let a = l.read();
     assert_eq!(a["id"], 3, "l'état répond pendant l'attente : {a}");
-    assert!(debut.elapsed() < Duration::from_millis(1500));
-    let b = l.lire();
+    assert!(began.elapsed() < Duration::from_millis(1500));
+    let b = l.read();
     assert_eq!((b["id"].as_u64(), b["code"].as_u64()), (Some(2), Some(200)), "{b}");
-    assert!(debut.elapsed() >= Duration::from_millis(1500), "l'attente a bien duré");
-    // Sans id : séquentiel, réponse sans id.
-    let c = l.appel("GET", "/etat", Value::Null);
+    assert!(began.elapsed() >= Duration::from_millis(1500), "l'attente a bien duré");
+    // Without id: sequential, response without id.
+    let c = l.call("GET", "/status", Value::Null);
     assert!(c.get("id").is_none() && c["code"] == 200, "{c}");
 }
 
-/// Clé stable d'une raison telle que la calcule `Raison::cle`.
-fn cle(raison: &Value) -> String {
-    let r: commun::modele::Raison = serde_json::from_value(raison.clone()).unwrap();
-    r.cle()
+/// Stable key of a reason, as `Reason::key` computes it.
+fn key(reason: &Value) -> String {
+    let r: clearway::model::Reason = serde_json::from_value(reason.clone()).unwrap();
+    r.key()
 }
 
 #[test]
-fn relais_bidirectionnel() {
-    let o = Orchestre::demarrer("relais-bidir");
-    o.creer("occupant", "windows", 12 * 1024);
-    let (_, t) = o.creer("patient", "windows", 8 * 1024);
+fn bidirectional_relay() {
+    let o = Orchestra::start("relais-bidir");
+    o.create("occupant", "windows", 12 * 1024);
+    let (_, t) = o.create("patient", "windows", 8 * 1024);
     let id = t["id"].as_u64().unwrap();
-    let mut relais = Command::new(env!("CARGO_BIN_EXE_orchestrateur"))
-        .args(["relais", "--tube", &o.tube])
+    let mut relay = Command::new(env!("CARGO_BIN_EXE_clearway"))
+        .args(["relay", "--pipe", &o.pipe])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let mut entree = relais.stdin.take().unwrap();
-    let mut sortie = BufReader::new(relais.stdout.take().unwrap());
-    let connu = cle(&t["raison"]);
-    let attente = json!({ "id": 1, "methode": "GET", "chemin": format!("/tickets/{id}/attente"), "parametres": { "connu": connu, "delai_s": "2" } });
-    writeln!(entree, "{attente}").unwrap();
-    writeln!(entree, "{}", json!({ "id": 2, "methode": "GET", "chemin": "/etat" })).unwrap();
-    let mut lire = || {
-        let mut ligne = String::new();
-        sortie.read_line(&mut ligne).unwrap();
-        serde_json::from_str::<Value>(&ligne).unwrap()
+    let mut input = relay.stdin.take().unwrap();
+    let mut out = BufReader::new(relay.stdout.take().unwrap());
+    let known = key(&t["reason"]);
+    let waiting = json!({ "id": 1, "method": "GET", "path": format!("/tickets/{id}/wait"), "params": { "known": known, "timeout_s": "2" } });
+    writeln!(input, "{waiting}").unwrap();
+    writeln!(input, "{}", json!({ "id": 2, "method": "GET", "path": "/status" })).unwrap();
+    let mut read = || {
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
     };
-    assert_eq!(lire()["id"], 2, "la réponse rapide passe devant l'attente en cours");
-    assert_eq!(lire()["id"], 1);
-    // Fin de stdin avec une requête `id` en cours : sortie sans l'attendre (un client multiplexé qui part).
-    writeln!(entree, "{attente}").unwrap();
-    drop(entree);
-    let debut = Instant::now();
-    assert!(attendre(Duration::from_secs(1), || matches!(relais.try_wait(), Ok(Some(_)))), "fin de stdin : le relais sort");
-    assert!(debut.elapsed() < Duration::from_secs(1));
-    assert_eq!(relais.wait().unwrap().code(), Some(0));
+    assert_eq!(read()["id"], 2, "la réponse rapide passe devant l'attente en cours");
+    assert_eq!(read()["id"], 1);
+    // End of stdin with an `id` request in flight: exit without waiting (a multiplexed client leaving).
+    writeln!(input, "{waiting}").unwrap();
+    drop(input);
+    let began = Instant::now();
+    assert!(wait(Duration::from_secs(1), || matches!(relay.try_wait(), Ok(Some(_)))), "fin de stdin : le relais sort");
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(relay.wait().unwrap().code(), Some(0));
 
-    // `echo requête | relais` : la réponse d'une requête sans `id` est rendue avant la sortie.
-    let sortie = Command::new(env!("CARGO_BIN_EXE_orchestrateur"))
-        .args(["relais", "--tube", &o.tube])
+    // `echo request | relay`: the response to a request without `id` is delivered before exiting.
+    let out = Command::new(env!("CARGO_BIN_EXE_clearway"))
+        .args(["relay", "--pipe", &o.pipe])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .and_then(|mut r| {
-            let attente = json!({ "methode": "GET", "chemin": format!("/tickets/{id}/attente"), "parametres": { "connu": cle(&t["raison"]), "delai_s": "1" } });
-            writeln!(r.stdin.take().unwrap(), "{attente}\n{}", json!({ "methode": "GET", "chemin": "/etat" }))?;
+            let waiting = json!({ "method": "GET", "path": format!("/tickets/{id}/wait"), "params": { "known": key(&t["reason"]), "timeout_s": "1" } });
+            writeln!(r.stdin.take().unwrap(), "{waiting}\n{}", json!({ "method": "GET", "path": "/status" }))?;
             r.wait_with_output()
         })
         .unwrap();
-    let lignes: Vec<Value> = texte(&sortie.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(lignes.len(), 2, "{lignes:?}");
-    assert_eq!(sortie.status.code(), Some(0));
+    let lines: Vec<Value> = text(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(out.status.code(), Some(0));
 }
 
 #[test]
-fn liaison_perdue_puis_reprise_par_la_meme_session() {
-    let o = Orchestre::demarrer("liaison");
-    let mut a = Ligne::ouvrir(&o);
-    let lien = a.lier("session-A");
-    assert_eq!((lien["code"].as_u64(), lien["corps"]["liaison"].as_u64()), (Some(200), Some(1)), "{lien}");
-    assert_eq!(a.lier("session-A")["code"], 409, "une seule liaison par connexion");
-    assert_eq!(a.appel("POST", "/liaison/battement", json!({}))["code"], 200);
-    let actif = a.creer("lie-actif", 4 * 1024);
-    let attente = a.creer("lie-attente", 14 * 1024);
-    assert_eq!((actif["corps"]["etat"].as_str(), attente["corps"]["etat"].as_str()), (Some("actif"), Some("attente")));
-    let (n1, n2) = (actif["corps"]["id"].as_u64().unwrap(), attente["corps"]["id"].as_u64().unwrap());
+fn lost_link_then_resumed_by_the_same_session() {
+    let o = Orchestra::start("liaison");
+    let mut a = Line::open(&o);
+    let link = a.open_link("session-A");
+    assert_eq!((link["code"].as_u64(), link["body"]["link"].as_u64()), (Some(200), Some(1)), "{link}");
+    assert_eq!(a.open_link("session-A")["code"], 409, "une seule liaison par connexion");
+    assert_eq!(a.call("POST", "/link/heartbeat", json!({}))["code"], 200);
+    let active = a.create("lie-actif", 4 * 1024);
+    let waiting = a.create("lie-attente", 14 * 1024);
+    assert_eq!((active["body"]["state"].as_str(), waiting["body"]["state"].as_str()), (Some("active"), Some("waiting")));
+    let (n1, n2) = (active["body"]["id"].as_u64().unwrap(), waiting["body"]["id"].as_u64().unwrap());
 
     drop(a);
-    assert!(attendre(Duration::from_secs(3), || o.etat_ticket(n1).as_deref() == Some("orphelin")), "{}", o.journal());
-    assert!(o.journal().contains("LIAISON #1 fermée"), "{}", o.journal());
-    let phrase = o.ticket(n1).unwrap()["phrase"].as_str().unwrap().to_owned();
-    assert!(phrase.contains("liaison de sa session perdue"), "{phrase}");
-    // Pas de gel : un autre client passe.
-    let (_, autre) = o.creer("autre", "windows", 1024);
-    assert_eq!(autre["etat"], "actif", "{autre}");
-    o.appel("POST", &format!("/tickets/{}/fin", autre["id"]), json!({}));
+    assert!(wait(Duration::from_secs(3), || o.ticket_state(n1).as_deref() == Some("orphaned")), "{}", o.log());
+    assert!(o.log().contains("LINK #1 fermée"), "{}", o.log());
+    let message = o.ticket(n1).unwrap()["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("liaison de sa session perdue"), "{message}");
+    // No freeze: another client goes through.
+    let (_, other) = o.create("autre", "windows", 1024);
+    assert_eq!(other["state"], "active", "{other}");
+    o.call("POST", &format!("/tickets/{}/release", other["id"]), json!({}));
 
-    // Une autre session ne reprend rien ; la même, si.
-    let mut b = Ligne::ouvrir(&o);
-    assert_eq!(b.lier("session-B")["corps"]["repris"], json!([]));
-    let mut c = Ligne::ouvrir(&o);
-    assert_eq!(c.lier("session-A")["corps"]["repris"], json!([n1, n2]));
-    assert_eq!(o.etat_ticket(n1).as_deref(), Some("actif"));
-    assert!(o.journal().contains(&format!("reprise de #{n1}, #{n2}")), "{}", o.journal());
+    // Another session resumes nothing; the same one does.
+    let mut b = Line::open(&o);
+    assert_eq!(b.open_link("session-B")["body"]["resumed"], json!([]));
+    let mut c = Line::open(&o);
+    assert_eq!(c.open_link("session-A")["body"]["resumed"], json!([n1, n2]));
+    assert_eq!(o.ticket_state(n1).as_deref(), Some("active"));
+    assert!(o.log().contains(&format!("reprise de #{n1}, #{n2}")), "{}", o.log());
 
-    // Sans reprise dans delai.reprise (3 s) : retirés.
+    // Without resume within delay.resume (3 s): removed.
     drop(c);
-    assert!(attendre(Duration::from_secs(8), || o.ticket(n1).is_none() && o.ticket(n2).is_none()), "{}", o.journal());
-    assert!(o.journal().contains(&format!("Ticket #{n1} retiré : liaison de sa session perdue")), "{}", o.journal());
+    assert!(wait(Duration::from_secs(8), || o.ticket(n1).is_none() && o.ticket(n2).is_none()), "{}", o.log());
+    assert!(o.log().contains(&format!("Ticket #{n1} retiré : liaison de sa session perdue")), "{}", o.log());
     drop(b);
 }
 
 #[test]
-fn reprise_de_liaison_apres_redemarrage() {
-    let mut o = Orchestre::demarrer("liaison-redemarrage");
-    let mut a = Ligne::ouvrir(&o);
-    a.lier("session-R");
-    let n = a.creer("survivant", 2048)["corps"]["id"].as_u64().unwrap();
-    o.tuer();
+fn link_resume_after_restart() {
+    let mut o = Orchestra::start("liaison-redemarrage");
+    let mut a = Line::open(&o);
+    a.open_link("session-R");
+    let n = a.create("survivant", 2048)["body"]["id"].as_u64().unwrap();
+    o.kill();
     drop(a);
-    o.lancer();
-    assert_eq!(o.etat_ticket(n).as_deref(), Some("orphelin"));
-    let mut b = Ligne::ouvrir(&o);
-    assert_eq!(b.lier("session-R")["corps"]["repris"], json!([n]));
-    assert_eq!(o.etat_ticket(n).as_deref(), Some("actif"));
-    assert_eq!(Ligne::ouvrir(&o).appel("POST", "/liaison/battement", json!({}))["code"], 409, "battement sans liaison");
+    o.launch();
+    assert_eq!(o.ticket_state(n).as_deref(), Some("orphaned"));
+    let mut b = Line::open(&o);
+    assert_eq!(b.open_link("session-R")["body"]["resumed"], json!([n]));
+    assert_eq!(o.ticket_state(n).as_deref(), Some("active"));
+    assert_eq!(Line::open(&o).call("POST", "/link/heartbeat", json!({}))["code"], 409, "battement sans liaison");
+}
+
+#[test]
+fn pre_clearway_clients_keep_working() {
+    let o = Orchestra::start("ancien-client");
+    // Raw French dialect of the old `charge`: French keys and routes in, French keys and values out.
+    let mut l = Line::open(&o);
+    l.send(json!({ "methode": "POST", "chemin": "/tickets", "corps": {
+        "requete_id": "ancien-1", "cote": "windows", "ram_mo": 1024, "cpu": 1, "duree_s": 600, "manuel": true,
+        "description": "ancien client", "session": "ancienne", "claude_session_id": null, "claude_pid": null,
+        "dossier": "/", "signature": "", "mesures": null } }));
+    let created = l.read();
+    assert_eq!(created["code"], 201, "{created}");
+    assert_eq!((created["corps"]["etat"].as_str(), created["corps"]["raison"]["decision"].as_str()), (Some("actif"), Some("feu_vert")), "{created}");
+    assert!(created.get("body").is_none() && created["corps"]["raison"]["phrase"].is_string(), "{created}");
+    l.send(json!({ "methode": "GET", "chemin": "/etat", "parametres": { "mem_dispo_mo": "4000", "mem_totale_mo": "11960", "charge1": "1" } }));
+    let status = l.read();
+    assert_eq!(status["corps"]["tickets"][0]["etat"], "actif", "{status}");
+    assert!(status["corps"]["mesures"]["wsl"]["mem_dispo_mo"].is_u64(), "{status}");
+    l.send(json!({ "methode": "POST", "chemin": "/tickets/1/fin", "corps": {} }));
+    assert_eq!(l.read()["corps"]["etat"], "termine");
+
+    // The old command name, through a link called `charge`: old subcommands, old variables, French texts.
+    let dir = o.dir.join("bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let charge = dir.join("charge");
+    let _ = std::fs::remove_file(&charge);
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_clearway"), &charge).unwrap();
+    let old = |args: &[&str]| {
+        Command::new(&charge)
+            .args(args)
+            .env("CHARGE_EXE", env!("CARGO_BIN_EXE_clearway"))
+            .env("CHARGE_TUBE", &o.pipe)
+            .env("CHARGE_DOSSIER", &o.dir)
+            .env("CHARGE_ARGS_LANCEMENT", "--test")
+            .env("CHARGE_SESSION", "ancienne")
+            .env("LC_ALL", "C.UTF-8")
+            .env_remove("CLEARWAY_LANG")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_PID")
+            .output()
+            .unwrap()
+    };
+    let d = old(&["demande", "--cote", "windows", "--ram", "1G", "tâche"]);
+    let id = text(&d.stdout).trim().to_owned();
+    assert!(text(&d.stderr).contains(&format!("Lance la tâche lourde, puis « charge fin {id} ».")), "{}", text(&d.stderr));
+    let a = old(&["attend", &id, "--max", "5s"]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    assert!(text(&a.stdout).contains(&format!("FEU VERT pour le ticket #{id} : lance ta tâche lourde maintenant, puis « charge fin {id} ».")), "{}", text(&a.stdout));
+    let s = old(&["statut"]);
+    assert!(text(&s.stdout).contains("actif"), "{}", text(&s.stdout));
+    assert_eq!(old(&["fin", &id]).status.code(), Some(0));
+}
+
+#[test]
+fn french_state_and_config_are_migrated() {
+    let mut o = Orchestra::prepare("migration");
+    std::fs::remove_file(o.dir.join("config.toml")).unwrap();
+    std::fs::write(
+        o.dir.join("config.toml"),
+        format!("tube = \"{}\"\nmarge.ram_windows = \"4G\"\ndelai.actif = \"3s\"\ndelai.long_poll = \"2s\"\n", o.pipe),
+    )
+    .unwrap();
+    std::fs::write(
+        o.dir.join("etat.json"),
+        r#"{"epoque": 10, "compteur": 44, "vmmem_pid": 4242, "gel_manuel": null, "tickets": [{
+            "id": 44, "requete_id": "r44", "cote": "wsl", "besoin": {"ram_mo": 4096, "cpu": 4, "duree_s": 3600},
+            "description": "GSTM", "session": "GSTM", "claude_session_id": null, "claude_pid": null, "dossier": "/",
+            "signature": "", "etat": "actif", "cree": 1794000000, "accorde": 1794000000, "dispo_accord_mo": 6000,
+            "manuel": true, "recu": true, "rappel": null, "cause_orphelin": null, "rattachement": "",
+            "projet": "gstm", "branche": "main", "force": false, "doublages": 0}]}"#,
+    )
+    .unwrap();
+    o.launch();
+    let t = o.ticket(44).expect("ticket 44 taken over");
+    assert_eq!((t["state"].as_str(), t["project"].as_str(), t["manual"].as_bool()), (Some("active"), Some("gstm"), Some(true)), "{t}");
+    assert_eq!(o.state()["epoch"], 11);
+    assert!(o.dir.join("state.json").exists() && o.dir.join("etat.json.before-clearway").exists());
+    assert!(!o.dir.join("etat.json").exists());
+    let config = std::fs::read_to_string(o.dir.join("config.toml")).unwrap();
+    assert!(config.contains(&format!("pipe = \"{}\"", o.pipe)) && config.contains("delay.silence = \"3s\""), "{config}");
+    assert!(o.dir.join("config.toml.before-clearway").exists());
+    assert!(o.log().contains("etat.json"), "{}", o.log());
+}
+
+#[test]
+fn english_messages() {
+    let mut o = Orchestra::prepare("anglais");
+    let config = std::fs::read_to_string(o.dir.join("config.toml")).unwrap().replace("language = \"fr\"", "language = \"en\"");
+    std::fs::write(o.dir.join("config.toml"), config).unwrap();
+    o.launch();
+    let d = o.cli(&["request", "--side", "windows", "--ram", "10G", "first"]).env("LC_ALL", "C.UTF-8").output().unwrap();
+    let id = text(&d.stdout).trim().to_owned();
+    assert!(text(&d.stderr).contains(&format!("clearway release {id}")), "{}", text(&d.stderr));
+    let (_, w) = o.create("second", "windows", 8 * 1024);
+    let message = w["reason"]["message"].as_str().unwrap();
+    assert!(message.contains("waiting, position 1") && message.contains("Windows RAM"), "{message}");
+    assert!(o.log().contains("REQUEST #2"), "{}", o.log());
 }

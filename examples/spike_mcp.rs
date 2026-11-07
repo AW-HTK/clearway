@@ -1,5 +1,5 @@
-//! Spike : serveur MCP stdio minimal avec un outil `dormir(secondes)`, qui journalise tout ce qu'il reçoit.
-//! Journal : `$SPIKE_DOSSIER/spike-<pid>.log`, par défaut `~/tmp/orchestrateur/spike/` (`%USERPROFILE%` sous Windows).
+//! Spike: minimal stdio MCP server with a `sleep(seconds)` tool, logging everything it receives.
+//! Log: `$SPIKE_DIR/spike-<pid>.log`, by default `~/tmp/orchestrateur/spike/` (`%USERPROFILE%` on Windows).
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -8,60 +8,60 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use commun::systeme::{horodatage, maintenant};
+use clearway::system::{timestamp, unix_now};
 use serde_json::{Value, json};
 
 const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const PROGRESSION: Duration = Duration::from_secs(30);
+const PROGRESS: Duration = Duration::from_secs(30);
 
-struct Journal(Mutex<std::fs::File>);
+struct Log(Mutex<std::fs::File>);
 
-impl Journal {
-    fn ecrire(&self, texte: &str) {
-        let horloge = format!("{}.{:03}", horodatage(maintenant()), millisecondes());
+impl Log {
+    fn write(&self, text: &str) {
+        let clock = format!("{}.{:03}", timestamp(unix_now()), milliseconds());
         if let Ok(mut f) = self.0.lock() {
-            let _ = writeln!(f, "{horloge} {texte}");
+            let _ = writeln!(f, "{clock} {text}");
             let _ = f.flush();
         }
     }
 }
 
-fn millisecondes() -> u32 {
+fn milliseconds() -> u32 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_millis()).unwrap_or(0)
 }
 
-struct Sortie {
-    journal: Arc<Journal>,
-    flux: Mutex<io::Stdout>,
+struct Output {
+    log: Arc<Log>,
+    stream: Mutex<io::Stdout>,
 }
 
-impl Sortie {
-    fn envoyer(&self, message: &Value) -> bool {
-        let ligne = message.to_string();
+impl Output {
+    fn send(&self, message: &Value) -> bool {
+        let line = message.to_string();
         let ok = self
-            .flux
+            .stream
             .lock()
-            .map(|mut s| writeln!(s, "{ligne}").and_then(|_| s.flush()).is_ok())
+            .map(|mut s| writeln!(s, "{line}").and_then(|_| s.flush()).is_ok())
             .unwrap_or(false);
-        self.journal.ecrire(&format!("→ {ligne}{}", if ok { "" } else { "  [ÉCHEC D'ÉCRITURE]" }));
+        self.log.write(&format!("→ {line}{}", if ok { "" } else { "  [WRITE FAILED]" }));
         ok
     }
 }
 
-fn dossier() -> PathBuf {
-    if let Some(d) = std::env::var_os("SPIKE_DOSSIER") {
+fn dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("SPIKE_DIR") {
         return PathBuf::from(d);
     }
-    let maison = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
-    PathBuf::from(maison).join("tmp").join("orchestrateur").join("spike")
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
+    PathBuf::from(home).join("tmp").join("orchestrateur").join("spike")
 }
 
-fn sensible(nom: &str) -> bool {
-    let n = nom.to_uppercase();
+fn sensitive(name: &str) -> bool {
+    let n = name.to_uppercase();
     ["TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH", "COOKIE", "CREDENTIAL"].iter().any(|m| n.contains(m))
 }
 
-fn environnement(journal: &Journal) {
+fn environment(log: &Log) {
     let mut vars: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| {
             ["CLAUDE", "CODEX", "MCP", "ANTHROPIC", "OPENAI", "WSL", "TERM_PROGRAM"].iter().any(|p| k.starts_with(p))
@@ -70,33 +70,33 @@ fn environnement(journal: &Journal) {
         .collect();
     vars.sort();
     for (k, v) in vars {
-        let v = if sensible(&k) { format!("<masqué, {} caractères>", v.len()) } else { v };
-        journal.ecrire(&format!("ENV {k}={v}"));
+        let v = if sensitive(&k) { format!("<masked, {} characters>", v.len()) } else { v };
+        log.write(&format!("ENV {k}={v}"));
     }
 }
 
-fn une_ligne(texte: &str) -> String {
-    let plat = texte.trim().replace(['\r', '\n'], " ⏎ ");
-    if plat.chars().count() > 400 { format!("{}…", plat.chars().take(400).collect::<String>()) } else { plat }
+fn one_line(text: &str) -> String {
+    let flat = text.trim().replace(['\r', '\n'], " ⏎ ");
+    if flat.chars().count() > 400 { format!("{}…", flat.chars().take(400).collect::<String>()) } else { flat }
 }
 
 #[cfg(unix)]
-fn ascendance(journal: &Journal) {
+fn ancestry(log: &Log) {
     let mut pid = std::process::id();
     for _ in 0..6 {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
         let parent = stat.rsplit(')').next().and_then(|r| r.split_whitespace().nth(1)).and_then(|p| p.parse::<u32>().ok());
         let Some(parent) = parent.filter(|&p| p > 1) else { break };
-        let ligne = std::fs::read(format!("/proc/{parent}/cmdline"))
+        let line = std::fs::read(format!("/proc/{parent}/cmdline"))
             .map(|o| o.split(|&b| b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
-        journal.ecrire(&format!("PARENT pid {parent} :: {}", une_ligne(&ligne)));
+        log.write(&format!("PARENT pid {parent} :: {}", one_line(&line)));
         pid = parent;
     }
 }
 
 #[cfg(windows)]
-fn ascendance(journal: &Journal) {
+fn ancestry(log: &Log) {
     use std::os::windows::process::CommandExt;
     let script = format!(
         "$p={}; for($i=0;$i -lt 7 -and $p;$i++){{ $w=Get-CimInstance Win32_Process -Filter \"ProcessId=$p\"; \
@@ -111,166 +111,166 @@ fn ascendance(journal: &Journal) {
     {
         Ok(o) => {
             for l in String::from_utf8_lossy(&o.stdout).lines().skip(1) {
-                journal.ecrire(&format!("PARENT {}", une_ligne(l)));
+                log.write(&format!("PARENT {}", one_line(l)));
             }
         }
-        Err(e) => journal.ecrire(&format!("PARENT inconnu : {e}")),
+        Err(e) => log.write(&format!("PARENT unknown: {e}")),
     }
 }
 
-fn dormir(sortie: Arc<Sortie>, id: Value, secondes: u64, jeton: Option<Value>, annule: Arc<AtomicBool>) {
-    let debut = Instant::now();
-    let total = Duration::from_secs(secondes);
-    let mut prochaine = PROGRESSION;
+fn sleep(out: Arc<Output>, id: Value, seconds: u64, token: Option<Value>, cancelled: Arc<AtomicBool>) {
+    let start = Instant::now();
+    let total = Duration::from_secs(seconds);
+    let mut next = PROGRESS;
     loop {
-        if annule.load(Ordering::SeqCst) {
-            sortie.journal.ecrire(&format!("DORMIR {id} annulé après {} s (pas de réponse, conformément à MCP)", debut.elapsed().as_secs()));
+        if cancelled.load(Ordering::SeqCst) {
+            out.log.write(&format!("SLEEP {id} cancelled after {} s (no response, as MCP requires)", start.elapsed().as_secs()));
             return;
         }
-        let ecoule = debut.elapsed();
-        if ecoule >= total {
+        let elapsed = start.elapsed();
+        if elapsed >= total {
             break;
         }
-        if ecoule >= prochaine {
-            prochaine += PROGRESSION;
-            if let Some(j) = &jeton {
-                sortie.envoyer(&json!({
+        if elapsed >= next {
+            next += PROGRESS;
+            if let Some(j) = &token {
+                out.send(&json!({
                     "jsonrpc": "2.0",
                     "method": "notifications/progress",
                     "params": {
                         "progressToken": j,
-                        "progress": ecoule.as_secs(),
-                        "total": secondes,
-                        "message": format!("Dort depuis {} s sur {secondes} s", ecoule.as_secs())
+                        "progress": elapsed.as_secs(),
+                        "total": seconds,
+                        "message": format!("Sleeping for {} s of {seconds} s", elapsed.as_secs())
                     }
                 }));
             } else {
-                sortie.journal.ecrire(&format!("DORMIR {id} : {} s, pas de progressToken", ecoule.as_secs()));
+                out.log.write(&format!("SLEEP {id}: {} s, no progressToken", elapsed.as_secs()));
             }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    let ok = sortie.envoyer(&json!({
+    let ok = out.send(&json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": { "content": [{ "type": "text", "text": format!("Réveillé après {secondes} s.") }], "isError": false }
+        "result": { "content": [{ "type": "text", "text": format!("Woke up after {seconds} s.") }], "isError": false }
     }));
-    sortie.journal.ecrire(&format!("DORMIR {id} terminé, réponse {}", if ok { "écrite" } else { "NON écrite" }));
+    out.log.write(&format!("SLEEP {id} done, response {}", if ok { "written" } else { "NOT written" }));
 }
 
-fn outils() -> Value {
+fn tools() -> Value {
     json!({ "tools": [{
-        "name": "dormir",
-        "description": "Attend le nombre de secondes demandé puis répond. Sert à tester les longs appels d'outils.",
+        "name": "sleep",
+        "description": "Waits for the requested number of seconds, then answers. Used to test long tool calls.",
         "inputSchema": {
             "type": "object",
-            "properties": { "secondes": { "type": "integer", "minimum": 0, "description": "Durée de l'attente" } },
-            "required": ["secondes"]
+            "properties": { "seconds": { "type": "integer", "minimum": 0, "description": "How long to wait" } },
+            "required": ["seconds"]
         }
     }]})
 }
 
 fn main() {
-    let dossier = dossier();
-    let _ = std::fs::create_dir_all(&dossier);
-    let chemin = dossier.join(format!("spike-{}.log", std::process::id()));
-    let fichier = std::fs::OpenOptions::new().create(true).append(true).open(&chemin).unwrap_or_else(|e| {
-        eprintln!("spike : journal {} impossible : {e}", chemin.display());
+    let dir = dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("spike-{}.log", std::process::id()));
+    let file = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap_or_else(|e| {
+        eprintln!("spike: cannot open log {}: {e}", path.display());
         std::process::exit(2)
     });
-    let journal = Arc::new(Journal(Mutex::new(fichier)));
-    journal.ecrire(&format!(
-        "DÉBUT pid {} · argv {:?} · dossier courant {:?}",
+    let log = Arc::new(Log(Mutex::new(file)));
+    log.write(&format!(
+        "START pid {} · argv {:?} · current dir {:?}",
         std::process::id(),
         std::env::args().collect::<Vec<_>>(),
         std::env::current_dir().ok()
     ));
-    environnement(&journal);
+    environment(&log);
     {
-        let journal = journal.clone();
-        std::thread::spawn(move || ascendance(&journal));
+        let log = log.clone();
+        std::thread::spawn(move || ancestry(&log));
     }
 
-    let sortie = Arc::new(Sortie { journal: journal.clone(), flux: Mutex::new(io::stdout()) });
-    let mut en_cours: HashMap<String, Arc<AtomicBool>> = HashMap::new();
-    let entree = io::stdin();
-    for ligne in entree.lock().lines() {
-        let ligne = match ligne {
+    let out = Arc::new(Output { log: log.clone(), stream: Mutex::new(io::stdout()) });
+    let mut in_flight: HashMap<String, Arc<AtomicBool>> = HashMap::new();
+    let input = io::stdin();
+    for line in input.lock().lines() {
+        let line = match line {
             Ok(l) => l,
             Err(e) => {
-                journal.ecrire(&format!("ERREUR de lecture de stdin : {e}"));
+                log.write(&format!("ERROR reading stdin: {e}"));
                 break;
             }
         };
-        journal.ecrire(&format!("← {ligne}"));
-        let Ok(m) = serde_json::from_str::<Value>(&ligne) else {
-            journal.ecrire("ligne illisible");
+        log.write(&format!("← {line}"));
+        let Ok(m) = serde_json::from_str::<Value>(&line) else {
+            log.write("unreadable line");
             continue;
         };
         let id = m.get("id").cloned();
-        let methode = m["method"].as_str().unwrap_or("");
+        let method = m["method"].as_str().unwrap_or("");
         let params = &m["params"];
-        match (methode, id) {
+        match (method, id) {
             ("initialize", Some(id)) => {
-                let demandee = params["protocolVersion"].as_str().unwrap_or("");
-                let version = if VERSIONS.contains(&demandee) { demandee } else { VERSIONS[1] };
-                journal.ecrire(&format!(
-                    "INITIALIZE client {} · version demandée {demandee:?}, retenue {version} · capacités {}",
+                let requested = params["protocolVersion"].as_str().unwrap_or("");
+                let version = if VERSIONS.contains(&requested) { requested } else { VERSIONS[1] };
+                log.write(&format!(
+                    "INITIALIZE client {} · requested version {requested:?}, chosen {version} · capabilities {}",
                     params["clientInfo"],
                     params["capabilities"]
                 ));
-                sortie.envoyer(&json!({
+                out.send(&json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
                         "protocolVersion": version,
                         "capabilities": { "tools": {} },
                         "serverInfo": { "name": "spike", "version": "0.1.0" },
-                        "instructions": "Serveur d'essai : l'outil dormir(secondes) attend puis répond."
+                        "instructions": "Test server: the sleep(seconds) tool waits, then answers."
                     }
                 }));
             }
             ("tools/list", Some(id)) => {
-                sortie.envoyer(&json!({ "jsonrpc": "2.0", "id": id, "result": outils() }));
+                out.send(&json!({ "jsonrpc": "2.0", "id": id, "result": tools() }));
             }
-            ("tools/call", Some(id)) if params["name"] == "dormir" => {
-                let secondes = params["arguments"]["secondes"].as_u64().unwrap_or(0);
-                let jeton = params["_meta"].get("progressToken").cloned();
-                journal.ecrire(&format!("DORMIR {id} : {secondes} s, progressToken {jeton:?}, _meta {}", params["_meta"]));
-                let annule = Arc::new(AtomicBool::new(false));
-                en_cours.insert(id.to_string(), annule.clone());
-                let sortie = sortie.clone();
-                std::thread::spawn(move || dormir(sortie, id, secondes, jeton, annule));
+            ("tools/call", Some(id)) if params["name"] == "sleep" => {
+                let seconds = params["arguments"]["seconds"].as_u64().unwrap_or(0);
+                let token = params["_meta"].get("progressToken").cloned();
+                log.write(&format!("SLEEP {id}: {seconds} s, progressToken {token:?}, _meta {}", params["_meta"]));
+                let cancelled = Arc::new(AtomicBool::new(false));
+                in_flight.insert(id.to_string(), cancelled.clone());
+                let out = out.clone();
+                std::thread::spawn(move || sleep(out, id, seconds, token, cancelled));
             }
             ("tools/call", Some(id)) => {
-                sortie.envoyer(&json!({
+                out.send(&json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "result": { "content": [{ "type": "text", "text": "Outil inconnu." }], "isError": true }
+                    "result": { "content": [{ "type": "text", "text": "Unknown tool." }], "isError": true }
                 }));
             }
             ("ping", Some(id)) => {
-                sortie.envoyer(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }));
+                out.send(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }));
             }
             ("notifications/cancelled", None) => {
-                let cible = params["requestId"].to_string();
-                journal.ecrire(&format!("ANNULATION de {cible} · raison {}", params["reason"]));
-                if let Some(a) = en_cours.get(&cible) {
+                let target = params["requestId"].to_string();
+                log.write(&format!("CANCELLATION of {target} · reason {}", params["reason"]));
+                if let Some(a) = in_flight.get(&target) {
                     a.store(true, Ordering::SeqCst);
                 }
             }
             (_, None) => {}
-            (autre, Some(id)) => {
-                sortie.envoyer(&json!({
+            (other, Some(id)) => {
+                out.send(&json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "error": { "code": -32601, "message": format!("méthode inconnue : {autre}") }
+                    "error": { "code": -32601, "message": format!("unknown method: {other}") }
                 }));
             }
         }
     }
-    let encore = en_cours.values().filter(|a| !a.load(Ordering::SeqCst)).count();
-    journal.ecrire(&format!("FIN DE STDIN · {encore} appel(s) dormir lancé(s) sans annulation ; sortie dans 2 s"));
+    let still = in_flight.values().filter(|a| !a.load(Ordering::SeqCst)).count();
+    log.write(&format!("END OF STDIN · {still} sleep call(s) started without cancellation; exiting in 2 s"));
     std::thread::sleep(Duration::from_secs(2));
-    journal.ecrire("SORTIE");
+    log.write("EXIT");
 }

@@ -1,11 +1,11 @@
 [package]
-name = "orchestrateur"
+name = "clearway"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [lib]
-name = "commun"
+name = "clearway"
 path = "src/lib.rs"
 
 [dependencies]
@@ -18,6 +18,7 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",

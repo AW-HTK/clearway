@@ -1,6 +1,8 @@
+pub mod compat;
 pub mod config;
 pub mod format;
-pub mod protocole;
-pub mod modele;
-pub mod planif;
-pub mod systeme;
+pub mod i18n;
+pub mod model;
+pub mod protocol;
+pub mod scheduler;
+pub mod system;
