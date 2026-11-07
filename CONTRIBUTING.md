@@ -24,7 +24,8 @@ the maintainer starts these runs after a first look at the change.
 - One topic per pull request, with tests for what changes.
 - `main` only changes through pull requests. The maintainer reviews each one and tests it on a real Windows machine,
   with and without WSL, before merging; this can take a while.
-- If you change the plugin (`plugins/`), raise its version in both manifests: Claude Code only sees a new version.
+- Clearway has one version: `Cargo.toml`, `Cargo.lock` and both plugin manifests (`plugins/clearway/.claude-plugin/`
+  and `.codex-plugin/`) move together at each release, even when the plugin itself did not change.
 
 ## Releases
 

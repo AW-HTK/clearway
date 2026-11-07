@@ -155,12 +155,59 @@ pub fn debit(r: Reserve, side: Side, b: &Need, m: &Measures, c: &Config) -> i64 
     }
 }
 
+/// Debits of a waiting ticket: on Windows RAM, a WSL ticket costs what it adds to the VM's growth, see [`WslShare`].
+pub fn needs_of(t: &Ticket, lev: &[Level; RESERVE_COUNT], m: &Measures, c: &Config) -> [i64; RESERVE_COUNT] {
+    RESERVES.map(|r| {
+        if r == Reserve::RamWindows && t.side == Side::Wsl {
+            let w = &lev[r.i()].wsl;
+            w.cost(w.pending + t.need.ram_mb as i64) - w.cost(w.pending)
+        } else {
+            debit(r, t.side, &t.need, m, c)
+        }
+    })
+}
+
+/// Windows RAM taken by the WSL tickets together: what they will still consume in WSL comes first out of the memory
+/// vmmemWSL holds unused, and the VM can only grow up to its cap.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WslShare {
+    /// What the non-waiting WSL tickets will still consume in WSL.
+    pub pending: i64,
+    /// [`wsl_reusable`].
+    pub pool: i64,
+    /// What vmmemWSL can still grow: cap − its size.
+    pub growth: i64,
+}
+
+impl WslShare {
+    pub fn cost(&self, pending: i64) -> i64 {
+        self.growth.min((pending - self.pool).max(0))
+    }
+
+    /// Largest WSL need whose Windows cost fits in `free`.
+    pub fn max_need(&self, free: i64) -> i64 {
+        let room = self.cost(self.pending) + free;
+        if room >= self.growth { i64::MAX } else { room + self.pool - self.pending }
+    }
+}
+
+/// Memory held by `vmmemWSL` that WSL does not use (page cache, freed pages): a WSL task takes it before the VM grows.
+/// Zero without a fresh WSL measure.
+pub fn wsl_reusable(m: &Measures, now: u64) -> i64 {
+    match (fresh_wsl(m, now), m.vmmem) {
+        (Some(w), Some(v)) => (v.rss_mb as i64 - w.mem_total_mb.saturating_sub(w.mem_avail_mb) as i64).max(0),
+        _ => 0,
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Level {
     pub available: i64,
     pub reserve: i64,
     pub holders: Vec<u64>,
     pub margin: i64,
+    /// Windows RAM only.
+    pub wsl: WslShare,
 }
 
 impl Level {
@@ -219,8 +266,12 @@ fn cpu_used_cores(r: Reserve, m: &Measures, c: &Config, now: u64) -> Option<f64>
 /// CPU after the ramp-up: the measured load shared between the settled tickets in proportion to their declaration,
 /// within [`CPU_FLOOR`, declared].
 pub fn reservation(e: &State, t: &Ticket, r: Reserve, m: &Measures, c: &Config, now: u64) -> i64 {
-    let b = debit(r, t.side, &t.need, m, c);
-    if b == 0 || t.state != TicketState::Active || ramping_up(t, c, now) {
+    reservation_of(e, t, r, debit(r, t.side, &t.need, m, c), m, c, now)
+}
+
+/// [`reservation`] of the debit `b`.
+fn reservation_of(e: &State, t: &Ticket, r: Reserve, b: i64, m: &Measures, c: &Config, now: u64) -> i64 {
+    if b == 0|| t.state != TicketState::Active || ramping_up(t, c, now) {
         return b;
     }
     if !r.is_ram() {
@@ -242,11 +293,14 @@ pub fn reservation(e: &State, t: &Ticket, r: Reserve, m: &Measures, c: &Config, 
     let base_windows = t.base_ram_windows_mb.or(main_reserve.filter(|_| t.side == Side::Windows));
     let wsl_drop = base_wsl.map(|base| base - available(Reserve::RamWsl, m, c, now));
     let risen = match (r, t.side) {
-        (Reserve::RamWindows, Side::Wsl) => t
-            .base_vmmem_mb
-            .zip(m.vmmem)
-            .map(|(base, v)| v.rss_mb.saturating_sub(base) as i64)
-            .or(wsl_drop),
+        // Consumed inside WSL counts as well: part of it came from memory vmmemWSL already held.
+        (Reserve::RamWindows, Side::Wsl) => {
+            let vm_rise = t.base_vmmem_mb.zip(m.vmmem).map(|(base, v)| v.rss_mb.saturating_sub(base) as i64);
+            match (vm_rise, wsl_drop) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            }
+        }
         (Reserve::RamWindows, _) => base_windows.map(|base| base - m.ram_avail_mb as i64),
         (Reserve::RamWsl, _) => wsl_drop,
         _ => None,
@@ -260,11 +314,30 @@ pub fn reservation(e: &State, t: &Ticket, r: Reserve, m: &Measures, c: &Config, 
 pub fn levels(e: &State, m: &Measures, c: &Config, now: u64) -> [Level; RESERVE_COUNT] {
     RESERVES.map(|r| {
         let mut n = Level { available: available(r, m, c, now), margin: margin(r, c), ..Level::default() };
+        let shared = r == Reserve::RamWindows;
+        let mut wsl_holders = Vec::new();
         for t in e.tickets.iter().filter(|t| t.state != TicketState::Waiting) {
+            if shared && t.side == Side::Wsl {
+                let p = reservation_of(e, t, r, t.need.ram_mb as i64, m, c, now);
+                n.wsl.pending += p;
+                if p > 0 {
+                    wsl_holders.push(t.id);
+                }
+                continue;
+            }
             let b = reservation(e, t, r, m, c, now);
             if b > 0 {
                 n.reserve += b;
                 n.holders.push(t.id);
+            }
+        }
+        if shared {
+            n.wsl.pool = wsl_reusable(m, now);
+            n.wsl.growth = c.wsl_ram_max_mb.saturating_sub(m.vmmem.map_or(0, |v| v.rss_mb)) as i64;
+            let cost = n.wsl.cost(n.wsl.pending);
+            if cost > 0 {
+                n.reserve += cost;
+                n.holders.extend(wsl_holders);
             }
         }
         n
@@ -445,6 +518,9 @@ fn grant(
         .filter(|r| needs[r.i()] > 0)
         .map(|&r| format!("{} {}", r.name(), r.amount(lev[r.i()].free())))
         .collect();
+    if t.side == Side::Wsl {
+        lev[Reserve::RamWindows.i()].wsl.pending += t.need.ram_mb as i64;
+    }
     let main_reserve = if t.side == Side::Wsl { Reserve::RamWsl } else { Reserve::RamWindows };
     let main_avail = lev[main_reserve.i()].available.max(0) as u64;
     for r in RESERVES {
@@ -717,7 +793,7 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
             reasons.insert(id, r);
             continue;
         }
-        let needs = RESERVES.map(|r| debit(r, t.side, &t.need, m, c));
+        let needs = needs_of(&t, &lev, m, c);
         let exclusive = needs[Reserve::Cpu.i()] > c.cpu_total as i64 - c.margin_cpu as i64;
         let other_wsl: Vec<&Ticket> =
             e.tickets.iter().filter(|a| a.state != TicketState::Waiting && a.side == Side::Wsl).collect();
@@ -1075,7 +1151,7 @@ pub fn force_preview(e: &State, id: u64, m: &Measures, c: &Config, now: u64) -> 
     let after: Vec<String> = RESERVES
         .iter()
         .filter_map(|&r| {
-            let b = debit(r, t.side, &t.need, m, c);
+            let b = needs_of(t, &lev, m, c)[r.i()];
             (b > 0).then(|| {
                 tr!(
                     "{} free after: {} (margin {})",
@@ -1104,7 +1180,7 @@ pub fn force_through(e: &State, id: u64, m: &Measures, c: &Config, now: u64) -> 
             )
         })?;
     let mut lev = levels(e, m, c, now);
-    let needs = RESERVES.map(|r| debit(r, t.side, &t.need, m, c));
+    let needs = needs_of(&t, &lev, m, c);
     let mut new = e.clone();
     let free_at_grant = grant(&mut new, &mut lev, &t, &needs, m, now);
     if let Some(f) = new.ticket_mut(id) {
@@ -1176,7 +1252,7 @@ fn wait_reason(
 ) -> Reason {
     let r = lacking[0];
     let n = &lev[r.i()];
-    let need = debit(r, t.side, &t.need, m, c);
+    let need = needs_of(t, lev, m, c)[r.i()];
     let of_which = if n.reserve > 0 {
         tr!(" of which {} reserved for {}", " dont {} réservés pour {}", r.amount(n.reserve), list(&n.holders))
     } else {
@@ -1226,7 +1302,7 @@ fn wait_reason(
         let max = RESERVES
             .iter()
             .filter(|r| r.is_ram() && r.need(t.side, &t.need) > 0)
-            .map(|r| lev[r.i()].free())
+            .map(|&r| if r == Reserve::RamWindows && t.side == Side::Wsl { lev[r.i()].wsl.max_need(lev[r.i()].free()) } else { lev[r.i()].free() })
             .min()
             .unwrap_or(0);
         if max >= 256 {
@@ -1263,6 +1339,7 @@ fn estimate(t: &Ticket, lev: &[Level; RESERVE_COUNT], e: &State, m: &Measures, c
     let mut free = lev.each_ref().map(Level::free);
     let mut actives: Vec<&Ticket> = e.tickets.iter().filter(|a| a.state == TicketState::Active).collect();
     actives.sort_by_key(|a| (a.planned_end(), a.id));
+    let needs = needs_of(t, lev, m, c);
     let mut expected = Vec::new();
     for a in actives {
         let mut useful = false;
@@ -1274,10 +1351,7 @@ fn estimate(t: &Ticket, lev: &[Level; RESERVE_COUNT], e: &State, m: &Measures, c
         if useful {
             expected.push(a.id);
         }
-        if RESERVES.iter().all(|&r| {
-            let b = debit(r, t.side, &t.need, m, c);
-            b == 0 || b <= free[r.i()]
-        }) {
+        if RESERVES.iter().all(|&r| needs[r.i()] == 0 || needs[r.i()] <= free[r.i()]) {
             return (a.planned_end(), expected);
         }
     }
