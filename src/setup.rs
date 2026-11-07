@@ -119,6 +119,47 @@ pub fn find_files(pattern: &str) -> Vec<std::path::PathBuf> {
     found
 }
 
+/// The installed Clearway for Windows against the version this setup holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Installed {
+    Older(String),
+    Same,
+    Newer(String),
+    Unknown,
+}
+
+/// Reads the output of `clearway.exe --version` (`clearway 0.1.2`).
+pub fn compare_installed(version_output: Option<&str>, setup: &str) -> Installed {
+    let Some(v) = version_output.and_then(|o| o.trim().strip_prefix("clearway ")).map(str::trim) else {
+        return Installed::Unknown;
+    };
+    match (crate::update::parse_version(v), crate::update::parse_version(setup)) {
+        (Some(i), Some(s)) if i < s => Installed::Older(v.to_owned()),
+        (Some(i), Some(s)) if i > s => Installed::Newer(v.to_owned()),
+        (Some(_), Some(_)) => Installed::Same,
+        _ => Installed::Unknown,
+    }
+}
+
+/// Sessions of one tool linked to Clearway: those running the plugin of this version, and older ones to restart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionCount {
+    pub current: usize,
+    pub old: usize,
+}
+
+/// Counts the sessions of `tool` (`claude`, `codex`) among the links of `/status`, a session once whatever its number
+/// of links; the client is `<tool> mcp <version>`.
+pub fn count_sessions(links: &[crate::model::LinkView], tool: &str, version: &str) -> SessionCount {
+    let mut sessions: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
+    for l in links.iter().filter(|l| l.client.split_whitespace().next() == Some(tool)) {
+        let current = l.client.split_whitespace().last() == Some(version);
+        *sessions.entry(l.session.as_str()).or_default() |= current;
+    }
+    let current = sessions.values().filter(|c| **c).count();
+    SessionCount { current, old: sessions.len() - current }
+}
+
 /// Trust of Clearway's hook in Codex: a hook must be approved in `/hooks` before Codex runs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookTrust {

@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 
-use clearway::setup::HookTrust;
+use clearway::setup::{HookTrust, Installed, SessionCount};
 use clearway::tr;
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -32,7 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::windows::{
     Action, Checks, Event, Options, Outcome, Row, Tool, check, daily_check_enabled, element, hint, install, installed,
-    plan, relaunch_from_temp, runs_from_install_dir, uninstall_plan,
+    installed_version, plan, relaunch_from_temp, runs_from_install_dir, uninstall_plan,
 };
 
 const WIDTH: i32 = 720;
@@ -330,16 +330,37 @@ fn show_maintenance() {
     leave_page(Page::Maintenance);
     let (page_title, text) = with(|u| (u.page_title, u.text));
     set_text(page_title, &tr!("Clearway is already installed", "Clearway est déjà installé"));
-    set_text(text, &tr!(
-        "This setup holds version {}. Nothing is changed before the next page.",
-        "Cette installation contient la version {}. Rien n'est modifié avant la page suivante.",
-        env!("CARGO_PKG_VERSION")
-    ));
-    let update = child(0, "BUTTON", &tr!("Update or repair", "Mettre à jour ou réparer"), WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON as u32, ID_UPDATE, BODY, (MARGIN, ROWS_TOP, INNER, 22));
-    let update_detail = tr!(
-        "Installs this version again and adds the plugin to the tools found.",
-        "Réinstalle cette version et ajoute le plugin aux outils trouvés."
-    );
+    let new = env!("CARGO_PKG_VERSION");
+    let (about, choice, update_detail) = match installed_version() {
+        Installed::Older(old) => (
+            tr!("Installed version: {old}. This setup holds version {new}.", "Version installée : {old}. Cette installation contient la version {new}."),
+            tr!("Update to {new}", "Mettre à jour vers la {new}"),
+            tr!(
+                "Replaces version {old}, keeps the settings and the log, and adds the plugin to the tools found.",
+                "Remplace la version {old}, garde les réglages et le journal, et ajoute le plugin aux outils trouvés."
+            ),
+        ),
+        Installed::Same => (
+            tr!("Version {new} is installed.", "La version {new} est installée."),
+            tr!("Repair", "Réparer"),
+            tr!("Installs this version again and adds the plugin to the tools found.", "Réinstalle cette version et ajoute le plugin aux outils trouvés."),
+        ),
+        Installed::Newer(installed) => (
+            tr!(
+                "Installed version: {installed}, newer than this setup's ({new}).",
+                "Version installée : {installed}, plus récente que celle de cette installation ({new})."
+            ),
+            tr!("Go back to {new}", "Revenir à la {new}"),
+            tr!("Replaces version {installed} with this older one.", "Remplace la version {installed} par cette version plus ancienne."),
+        ),
+        Installed::Unknown => (
+            tr!("This setup holds version {new}.", "Cette installation contient la version {new}."),
+            tr!("Update or repair", "Mettre à jour ou réparer"),
+            tr!("Installs this version again and adds the plugin to the tools found.", "Réinstalle cette version et ajoute le plugin aux outils trouvés."),
+        ),
+    };
+    set_text(text, &format!("{about} {}", tr!("Nothing is changed before the next page.", "Rien n'est modifié avant la page suivante.")));
+    let update = child(0, "BUTTON", &choice, WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON as u32, ID_UPDATE, BODY, (MARGIN, ROWS_TOP, INNER, 22));
     let remove = child(0, "BUTTON", &tr!("Uninstall", "Désinstaller"), WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, ID_REMOVE, BODY, (MARGIN, ROWS_TOP + ROW_STEP, INNER, 22));
     let remove_detail = tr!(
         "Removes Clearway from Windows, from WSL and from Claude Code and Codex.",
@@ -660,8 +681,21 @@ fn start_check() {
     });
 }
 
-fn sessions_text(n: usize) -> String {
-    if n == 1 { tr!("1 session linked", "1 session connectée") } else { tr!("{n} sessions linked", "{n} sessions connectées") }
+/// Done once every linked session runs this version's plugin.
+fn sessions_state(n: SessionCount) -> (Option<bool>, String) {
+    let linked = |k: usize| if k == 1 { tr!("1 session linked", "1 session connectée") } else { tr!("{k} sessions linked", "{k} sessions connectées") };
+    match (n.current, n.old) {
+        (0, 0) => (Some(false), tr!("no session linked yet", "aucune session connectée pour l'instant")),
+        (k, 0) => (Some(true), linked(k)),
+        (k, old) => (
+            Some(false),
+            tr!(
+                "{} · {old} still on an older version: restart it",
+                "{} · {old} encore sur une ancienne version : à relancer",
+                if k == 0 { tr!("none up to date", "aucune à jour") } else { linked(k) }
+            ),
+        ),
+    }
 }
 
 fn on_checked(c: Checks) {
@@ -674,10 +708,7 @@ fn on_checked(c: Checks) {
         let (done, text) = match kind {
             Reopen::Claude | Reopen::Codex => match c.sessions {
                 None => (None, tr!("Clearway does not answer: look at its icon next to the clock.", "Clearway ne répond pas : regardez son icône près de l'horloge.")),
-                Some((claude, codex)) => {
-                    let n = if kind == Reopen::Claude { claude } else { codex };
-                    if n > 0 { (Some(true), sessions_text(n)) } else { (Some(false), tr!("no session linked yet", "aucune session connectée pour l'instant")) }
-                }
+                Some((claude, codex)) => sessions_state(if kind == Reopen::Claude { claude } else { codex }),
             },
             Reopen::CodexGuard => {
                 let all = !c.trust.is_empty() && c.trust.iter().all(|(_, t)| *t == HookTrust::Trusted);
