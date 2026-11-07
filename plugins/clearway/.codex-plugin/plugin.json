@@ -6,6 +6,7 @@
     "name": "AW-HTK"
   },
   "repository": "https://github.com/AW-HTK/clearway",
+  "license": "MIT",
   "keywords": [
     "resources",
     "queue",
