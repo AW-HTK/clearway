@@ -96,11 +96,22 @@ fn sessions_are_counted_once_and_old_versions_apart() {
         link("Claude a", "claude mcp 0.1.2"),
         link("Claude a", "claude mcp 0.1.2"),
         link("Claude b", "claude mcp 0.1.1"),
+        link("Claude d", "claude mcp 0.1.1"),
+        link("Claude d", "claude mcp 0.1.2"),
         link("Codex c", "codex mcp 0.1.2"),
     ];
-    assert_eq!(count_sessions(&links, "claude", "0.1.2"), SessionCount { current: 1, old: 1 });
-    assert_eq!(count_sessions(&links, "codex", "0.1.2"), SessionCount { current: 1, old: 0 });
-    assert_eq!(count_sessions(&[], "codex", "0.1.2"), SessionCount::default());
+    let old = |s: &str, v: &str| (s.to_owned(), v.to_owned());
+    assert_eq!(sessions_of(&links, "claude", "0.1.2"), Sessions { current: 2, old: vec![old("Claude b", "0.1.1")] });
+    assert_eq!(sessions_of(&links, "codex", "0.1.2"), Sessions { current: 1, old: vec![] });
+    assert_eq!(sessions_of(&[], "codex", "0.1.2"), Sessions::default());
+}
+
+#[test]
+fn old_sessions_are_named_then_counted() {
+    let old: Vec<(String, String)> = ["a", "b", "c", "d"].iter().map(|s| (format!("Claude {s}"), "0.1.2".to_owned())).collect();
+    assert_eq!(old_sessions_list(&old[..1], 3), "Claude a (0.1.2)");
+    assert_eq!(old_sessions_list(&old, 3), "Claude a (0.1.2), Claude b (0.1.2), Claude c (0.1.2), +1");
+    assert_eq!(old_sessions_list(&[], 3), "");
 }
 
 #[test]
