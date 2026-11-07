@@ -1,0 +1,16 @@
+{
+  "name": "clearway",
+  "owner": { "name": "AW-HTK" },
+  "metadata": {
+    "description": "Clearway: one queue for heavy tasks (builds, test suites, renders, local AI) shared by every AI session on a Windows machine, with or without WSL."
+  },
+  "plugins": [
+    {
+      "name": "clearway",
+      "source": "./plugins/clearway",
+      "description": "Waits for a free slot of RAM and CPU before heavy tasks, so parallel AI sessions do not freeze the machine.",
+      "category": "productivity",
+      "policy": { "installation": "AVAILABLE" }
+    }
+  ]
+}

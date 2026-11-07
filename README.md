@@ -26,6 +26,20 @@ cargo test -j 4    # unit + integration (Linux build of the server on a Unix soc
 - Client variables: `CLEARWAY_EXE`, `CLEARWAY_PIPE`, `CLEARWAY_DIR` (state folder seen from WSL, for the maintenance
   file), `CLEARWAY_LAUNCH_ARGS`, `CLEARWAY_SESSION`, `CLEARWAY_LANG`.
 
+## Plugins (Claude Code and Codex)
+
+This repository is a plugin marketplace for both. The plugin (`plugins/clearway/`) brings the `clearway` MCP server
+(`clearway mcp`, so `clearway` or `clearway.exe` must be on the `PATH`), the `heavy-tasks` skill and, for Claude Code,
+the `clearance-waiter` agent.
+
+```sh
+claude plugin marketplace add AW-HTK/clearway && claude plugin install clearway@clearway --scope user
+codex plugin marketplace add AW-HTK/clearway && codex plugin add clearway@clearway
+```
+
+In Claude Code the tools are named `mcp__plugin_clearway_clearway__<tool>`. Codex reads the same
+`.claude-plugin/marketplace.json` and the plugin's `.codex-plugin/plugin.json`.
+
 ## Files
 
 - Exe: `%LOCALAPPDATA%\Programs\clearway\clearway.exe`; scheduled task `Clearway` (`windows/install-task.ps1`),

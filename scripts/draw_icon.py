@@ -1,6 +1,7 @@
 """Draws Clearway's icon (a round C with a chevron, the C alone at 16 px) into assets/icon/.
 
-`uvx --with pillow python scripts/draw_icon.py`: 256 px PNGs, clearway.ico (green, exe), tray-<color>-<size>.bgra (raw).
+`uvx --with pillow python scripts/draw_icon.py`: 256 px PNGs, clearway.ico (green, exe), tray-<color>-<size>.bgra (raw),
+and the 512 px plugin icon.
 """
 import math
 from pathlib import Path
@@ -10,7 +11,9 @@ from PIL import Image, ImageDraw
 COLORS = {"green": (46, 170, 90), "orange": (240, 150, 30), "red": (220, 60, 50), "grey": (140, 145, 150)}
 TRAY_SIZES = (16, 20, 24, 32)
 ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
-OUT = Path(__file__).resolve().parent.parent / "assets" / "icon"
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "assets" / "icon"
+PLUGIN_ICON = ROOT / "plugins" / "clearway" / "assets" / "icon.png"
 
 
 def icon(size, color, scale=8):
@@ -50,6 +53,8 @@ def main():
             (OUT / f"tray-{name}-{size}.bgra").write_bytes(bgra(icon(size, color)))
     green = [icon(s, COLORS["green"]) for s in ICO_SIZES]
     green[-1].save(OUT / "clearway.ico", sizes=[(s, s) for s in ICO_SIZES], append_images=green[:-1])
+    PLUGIN_ICON.parent.mkdir(parents=True, exist_ok=True)
+    icon(512, COLORS["green"], scale=4).save(PLUGIN_ICON)
     print(f"icons written to {OUT}")
 
 

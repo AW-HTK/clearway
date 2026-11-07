@@ -1,0 +1,31 @@
+{
+  "name": "clearway",
+  "version": "0.1.0",
+  "description": "Waits for a free slot of RAM and CPU before heavy tasks, so parallel AI sessions do not freeze the machine.",
+  "author": {
+    "name": "AW-HTK"
+  },
+  "repository": "https://github.com/AW-HTK/clearway",
+  "keywords": [
+    "resources",
+    "queue",
+    "ram",
+    "cpu",
+    "wsl",
+    "windows"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Clearway",
+    "shortDescription": "Queue heavy tasks across AI sessions",
+    "longDescription": "Before a build, a full test suite, a render or a local AI job, the session asks Clearway for a slot and waits for its turn, so several sessions do not exhaust RAM, CPU or VRAM at the same time.",
+    "developerName": "AW-HTK",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png"
+  }
+}

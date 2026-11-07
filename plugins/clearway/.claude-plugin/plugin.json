@@ -1,0 +1,8 @@
+{
+  "name": "clearway",
+  "version": "0.1.0",
+  "description": "Waits for a free slot of RAM and CPU before heavy tasks, so parallel AI sessions do not freeze the machine.",
+  "author": { "name": "AW-HTK" },
+  "repository": "https://github.com/AW-HTK/clearway",
+  "keywords": ["resources", "queue", "ram", "cpu", "wsl", "windows"]
+}
