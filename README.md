@@ -21,7 +21,7 @@ the Claude Code and Codex sessions; in Codex, trust the Clearway hook once with 
 Without the setup, from a terminal:
 
 ```powershell
-irm https://github.com/AW-HTK/clearway/releases/latest/download/install.ps1 | iex     # Windows (PowerShell)
+iex ([Text.Encoding]::UTF8.GetString((iwr -UseBasicParsing https://github.com/AW-HTK/clearway/releases/latest/download/install.ps1).Content).TrimStart([char]0xFEFF))  # Windows
 ```
 ```sh
 curl -fsSL https://github.com/AW-HTK/clearway/releases/latest/download/install.sh | sh  # each WSL distribution
@@ -29,10 +29,20 @@ curl -fsSL https://github.com/AW-HTK/clearway/releases/latest/download/install.s
 
 Both scripts check the SHA-256 of what they download against `SHA256SUMS`.
 
+## Updates
+
+Nothing updates by itself, neither the programs nor the plugin. The tray menu has **Check for updates** (or set
+`update.check = "daily"` in `config.toml`); when a release is newer, Clearway offers it in a balloon and in the menu. A
+click downloads `clearway-setup.exe`, checks that `SHA256SUMS` is signed by Clearway's Ed25519 key and that the setup
+matches it, then opens the setup, which shows what it changes and asks first. `windows/install.ps1` checks that the
+server answering after the switch is the new version, and otherwise puts the previous exe back.
+
 ## Build
 
-`scripts/build-release.sh` builds every release file into `dist/` (needs cargo-zigbuild and the targets
-`x86_64-pc-windows-gnu` and `x86_64-unknown-linux-musl`). For development:
+`scripts/build-release.sh` builds every release file into `dist/` (needs cargo-zigbuild, the targets
+`x86_64-pc-windows-gnu` and `x86_64-unknown-linux-musl`, and the signing seed in `CLEARWAY_RELEASE_SIGNING_KEY`;
+`examples/sign_release.rs` holds the maintainer's commands). It refuses a release whose plugin changed without a new
+plugin version. For development:
 
 ```sh
 export PATH=$HOME/.cargo/bin:$(echo ~/.local/share/uv/tools/cargo-zigbuild/lib/python*/site-packages/ziglang):$PATH

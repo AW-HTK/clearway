@@ -17,6 +17,11 @@ static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
 static TEST: AtomicBool = AtomicBool::new(false);
 static ICON: AtomicBool = AtomicBool::new(true);
 
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn in_test() -> bool {
+    TEST.load(Ordering::SeqCst)
+}
+
 pub fn test_mode(with_icon: bool) {
     TEST.store(true, Ordering::SeqCst);
     ICON.store(with_icon, Ordering::SeqCst);
@@ -66,12 +71,12 @@ pub fn warn(title: &str, text: &str) {
 }
 
 #[cfg(windows)]
-pub use native::{warn, run_loop, balloon, start, window, update, open_log, quit};
+pub use native::{warn, run_loop, balloon, update_balloon, open, start, window, update, open_log, quit};
 
 #[cfg(windows)]
 mod native {
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
@@ -92,6 +97,7 @@ mod native {
     };
 
     use super::{Color, ICON, TEST, shared};
+    use crate::updater;
     use crate::window;
     use crate::server::log_line;
 
@@ -102,12 +108,18 @@ mod native {
     const CMD_FREEZE: usize = 2;
     const CMD_LOG: usize = 3;
     const CMD_QUIT: usize = 4;
+    const CMD_UPDATE_CHECK: usize = 5;
+    const CMD_UPDATE_INSTALL: usize = 6;
+    /// Sent when the user clicks a balloon (NOTIFYICON_VERSION_4).
+    const NIN_BALLOONUSERCLICK: u32 = 0x0405;
 
     static HIDDEN: AtomicUsize = AtomicUsize::new(0);
     static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
     static ICONS: OnceLock<[usize; 4]> = OnceLock::new();
     static LOG: OnceLock<Option<PathBuf>> = OnceLock::new();
     static LAST: Mutex<Option<(Color, String)>> = Mutex::new(None);
+    /// The balloon on screen offers an update: a click on it installs.
+    static UPDATE_BALLOON: AtomicBool = AtomicBool::new(false);
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain([0]).collect()
@@ -225,6 +237,7 @@ mod native {
     }
 
     pub fn balloon(title: &str, text: &str, alert: bool) {
+        UPDATE_BALLOON.store(false, Ordering::SeqCst);
         if TEST.load(Ordering::SeqCst) || !with_icon() {
             return;
         }
@@ -236,8 +249,27 @@ mod native {
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &d) };
     }
 
+    pub fn update_balloon(title: &str, text: &str) {
+        balloon(title, text, false);
+        UPDATE_BALLOON.store(true, Ordering::SeqCst);
+    }
+
     pub fn window(open: bool) {
         unsafe { PostMessageW(hidden(), WM_WINDOW, open as usize, 0) };
+    }
+
+    /// Opens a file as a double-click would (a console program gets its own window).
+    pub fn open(path: &std::path::Path) -> bool {
+        let file = wide(&path.to_string_lossy());
+        let verb = wide("open");
+        let r = unsafe {
+            ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+        };
+        r as usize > 32
+    }
+
+    fn state_dir() -> Option<PathBuf> {
+        LOG.get()?.as_ref()?.parent().map(PathBuf::from)
     }
 
     pub fn quit() {
@@ -275,10 +307,17 @@ mod native {
                 clearway::tr!("Freeze the queue", "Geler la file")
             });
             let log = wide(&clearway::tr!("Open the log", "Ouvrir le journal"));
+            let check = wide(&clearway::tr!("Check for updates", "Rechercher les mises à jour"));
             let quit = wide(&clearway::tr!("Quit", "Quitter"));
+            if let Some(r) = updater::available() {
+                let install = wide(&clearway::tr!("Install Clearway {}…", "Installer Clearway {}…", r.version));
+                AppendMenuW(m, MF_STRING, CMD_UPDATE_INSTALL, install.as_ptr());
+                AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+            }
             AppendMenuW(m, MF_STRING, CMD_OPEN, open.as_ptr());
             AppendMenuW(m, MF_STRING, CMD_FREEZE, freeze.as_ptr());
             AppendMenuW(m, MF_STRING, CMD_LOG, log.as_ptr());
+            AppendMenuW(m, MF_STRING, CMD_UPDATE_CHECK, check.as_ptr());
             AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
             AppendMenuW(m, MF_STRING, CMD_QUIT, quit.as_ptr());
             let mut p = POINT { x: 0, y: 0 };
@@ -306,6 +345,11 @@ mod native {
                     match (lparam & 0xffff) as u32 {
                         WM_CONTEXTMENU | WM_RBUTTONUP => menu(h),
                         WM_LBUTTONDBLCLK | NIN_SELECT => window::open(true),
+                        NIN_BALLOONUSERCLICK if UPDATE_BALLOON.load(Ordering::SeqCst) => {
+                            if let Some(dir) = state_dir() {
+                                updater::install(&dir);
+                            }
+                        }
                         _ => {}
                     }
                     0
@@ -327,6 +371,16 @@ mod native {
                             }
                         }
                         CMD_LOG => open_log(),
+                        CMD_UPDATE_CHECK => {
+                            if let Some(dir) = state_dir() {
+                                updater::check(&dir, true);
+                            }
+                        }
+                        CMD_UPDATE_INSTALL => {
+                            if let Some(dir) = state_dir() {
+                                updater::install(&dir);
+                            }
+                        }
                         CMD_QUIT => {
                             DestroyWindow(h);
                         }

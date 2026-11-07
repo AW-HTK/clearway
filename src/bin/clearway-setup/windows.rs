@@ -10,12 +10,13 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MARKETPLACE: &str = "AW-HTK/clearway";
 const PLUGIN: &str = "clearway@clearway";
 
-const FILES: [(&str, &[u8]); 5] = [
+const FILES: [(&str, &[u8]); 6] = [
     ("clearway.exe", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/clearway.exe"))),
     ("clearway-x86_64-linux", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/clearway-x86_64-linux"))),
     ("install.ps1", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/install.ps1"))),
     ("install.sh", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/install.sh"))),
     ("SHA256SUMS", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/SHA256SUMS"))),
+    ("VERSION", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/VERSION"))),
 ];
 
 #[derive(Clone, Copy, PartialEq)]

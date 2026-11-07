@@ -44,8 +44,8 @@ case :$PATH: in
            "Ajoutez $bin à votre PATH (par exemple dans ~/.profile), puis ouvrez un nouveau terminal." ;;
 esac
 if ! ls /mnt/c/Users/*/AppData/Local/Programs/clearway/clearway.exe >/dev/null 2>&1 && [ -z "${CLEARWAY_EXE:-}" ]; then
-    say "clearway.exe is not installed on Windows yet: in PowerShell, run
-  irm https://github.com/AW-HTK/clearway/releases/latest/download/install.ps1 | iex" \
-        "clearway.exe n'est pas encore installé côté Windows : dans PowerShell, lancez
-  irm https://github.com/AW-HTK/clearway/releases/latest/download/install.ps1 | iex"
+    say "clearway.exe is not installed on Windows yet: run clearway-setup.exe from
+  https://github.com/AW-HTK/clearway/releases/latest" \
+        "clearway.exe n'est pas encore installé côté Windows : lancez clearway-setup.exe, à télécharger sur
+  https://github.com/AW-HTK/clearway/releases/latest"
 fi

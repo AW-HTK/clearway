@@ -9,6 +9,8 @@ mod server;
 mod transport;
 mod ui;
 #[cfg(windows)]
+mod updater;
+#[cfg(windows)]
 mod window;
 
 use std::path::{Path, PathBuf};
@@ -170,6 +172,10 @@ fn serve(args: &[String]) -> i32 {
         );
     }
     let config_legacy_pipe = config.legacy_pipe && config.pipe == DEFAULT_PIPE;
+    #[cfg(windows)]
+    if config.update_check_daily && !ui::in_test() {
+        updater::daily(dir.clone());
+    }
     let server = match Server::start(dir.clone(), config, measures) {
         Ok(s) => s,
         Err(e) => return failure(&dir, &clearway::tr!("Cannot start", "Démarrage impossible"), &e, 2),

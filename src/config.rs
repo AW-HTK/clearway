@@ -35,6 +35,8 @@ pub struct Config {
     pub cpu_pressure_pct: u64,
     pub cpu_release_pct: u64,
     pub cpu_pressure_delay_s: u64,
+    /// Look for a new release once a day (otherwise only from the tray menu).
+    pub update_check_daily: bool,
 }
 
 impl Default for Config {
@@ -66,6 +68,7 @@ impl Default for Config {
             cpu_pressure_pct: 85,
             cpu_release_pct: 70,
             cpu_pressure_delay_s: 60,
+            update_check_daily: false,
         }
     }
 }
@@ -189,6 +192,13 @@ impl Config {
                 "cpu.pressure" => c.cpu_pressure_pct = integer()?.into(),
                 "cpu.pressure_release" => c.cpu_release_pct = integer()?.into(),
                 "cpu.pressure_delay" => c.cpu_pressure_delay_s = seconds()?,
+                "update.check" => {
+                    c.update_check_daily = match value {
+                        "manual" => false,
+                        "daily" => true,
+                        _ => return Err(error(tr!("update.check: manual or daily", "update.check : manual ou daily"))),
+                    }
+                }
                 _ => return Err(error(tr!("unknown key", "clé inconnue"))),
             }
         }
@@ -261,6 +271,10 @@ swap.out_rate = {out_rate}
 cpu.pressure = {cpu_pressure}
 cpu.pressure_release = {cpu_release}
 cpu.pressure_delay = "{cpu_delay}"
+
+# New releases: "manual" (tray menu only) or "daily" (asks GitHub once a day). Nothing installs by itself: an
+# available release is offered, and the setup asks before changing anything.
+update.check = "{update_check}"
 "#,
             pipe = self.pipe,
             legacy_pipe = self.legacy_pipe,
@@ -286,6 +300,7 @@ cpu.pressure_delay = "{cpu_delay}"
             cpu_pressure = self.cpu_pressure_pct,
             cpu_release = self.cpu_release_pct,
             cpu_delay = duration_option(self.cpu_pressure_delay_s),
+            update_check = if self.update_check_daily { "daily" } else { "manual" },
         )
     }
 

@@ -425,6 +425,9 @@ pub struct TicketView {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
+    /// Version of the running server, checked by the installer after an update.
+    #[serde(default)]
+    pub version: String,
     pub epoch: u64,
     pub now: u64,
     pub measures: Measures,

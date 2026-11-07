@@ -514,6 +514,7 @@ impl Server {
             alerts.push(clearway::tr!("Information: {info}, no freeze.", "Information : {info}, pas de gel."));
         }
         Status {
+            version: env!("CARGO_PKG_VERSION").into(),
             epoch: self.state.epoch,
             now,
             measures: self.measures.clone(),
