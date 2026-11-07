@@ -153,7 +153,7 @@ impl Connector for Relay {
 }
 
 #[cfg(unix)]
-fn ancestors() -> Vec<Process> {
+pub(crate) fn ancestors() -> Vec<Process> {
     let parent_of = |pid: u32| -> Option<u32> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         stat.rsplit_once(") ")?.1.split_whitespace().nth(1)?.parse().ok()
@@ -220,7 +220,7 @@ fn launch_self() {
 }
 
 #[cfg(windows)]
-fn ancestors() -> Vec<Process> {
+pub(crate) fn ancestors() -> Vec<Process> {
     use std::collections::HashMap;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{

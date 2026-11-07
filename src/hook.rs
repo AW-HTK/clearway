@@ -316,15 +316,23 @@ fn quote(word: &str) -> String {
     }
 }
 
-fn owned_by(t: &TicketView, session_id: &str) -> bool {
-    !session_id.is_empty()
+fn owned_by(t: &TicketView, session_id: &str, ancestors: &[u32]) -> bool {
+    let same_session = !session_id.is_empty()
         && (t.claude_session_id.as_deref() == Some(session_id)
-            || t.identity.as_deref().and_then(|k| k.split_once(':')).is_some_and(|(_, id)| id == session_id))
+            || t.identity.as_deref().and_then(|k| k.split_once(':')).is_some_and(|(_, id)| id == session_id));
+    // Codex gives its MCP servers no thread id: their tickets carry the Codex process, which also starts this hook.
+    let same_codex = t
+        .identity
+        .as_deref()
+        .and_then(|k| k.strip_prefix("codex-pid:"))
+        .and_then(|p| p.parse::<u32>().ok())
+        .is_some_and(|pid| ancestors.contains(&pid));
+    same_session || same_codex
 }
 
-/// Allows the heavy command `what` when the session holds an active ticket.
-pub fn decide(what: &str, command: &str, session_id: &str, tickets: &[TicketView]) -> Verdict {
-    let mine: Vec<&TicketView> = tickets.iter().filter(|t| owned_by(t, session_id)).collect();
+/// Allows the heavy command `what` when the session holds an active ticket; `ancestors`: pids of the hook's parents.
+pub fn decide(what: &str, command: &str, session_id: &str, ancestors: &[u32], tickets: &[TicketView]) -> Verdict {
+    let mine: Vec<&TicketView> = tickets.iter().filter(|t| owned_by(t, session_id, ancestors)).collect();
     if mine.iter().any(|t| t.state == TicketState::Active) {
         return Verdict::Allow;
     }
