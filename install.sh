@@ -1,13 +1,18 @@
 #!/bin/sh
-# Installs or updates the clearway client of a WSL distribution in ~/.local/bin.
-#   curl -fsSL https://github.com/AW-HTK/clearway/releases/latest/download/install.sh | sh
-# Variables: CLEARWAY_SOURCE (URL or folder of the release files), CLEARWAY_BIN_DIR, CLEARWAY_LANG (en, fr).
+# Installs or updates the clearway client of a WSL distribution in ~/.local/bin. clearway-setup.exe runs it; to run
+# it by hand, point CLEARWAY_SOURCE at a dist/ folder (scripts/build-release.sh).
+# Other variables: CLEARWAY_BIN_DIR, CLEARWAY_LANG (en, fr).
 set -eu
 
-source=${CLEARWAY_SOURCE:-https://github.com/AW-HTK/clearway/releases/latest/download}
 bin=${CLEARWAY_BIN_DIR:-$HOME/.local/bin}
 case ${CLEARWAY_LANG:-${LC_ALL:-${LANG:-}}} in fr*) fr=1 ;; *) fr= ;; esac
 say() { if [ -n "$fr" ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
+source=${CLEARWAY_SOURCE:-}
+if [ -z "$source" ]; then
+    say "Run clearway-setup.exe on Windows (https://github.com/AW-HTK/clearway/releases/latest), or set CLEARWAY_SOURCE to a dist/ folder." \
+        "Lancez clearway-setup.exe sous Windows (https://github.com/AW-HTK/clearway/releases/latest), ou définissez CLEARWAY_SOURCE vers un dossier dist/." >&2
+    exit 2
+fi
 
 case $(uname -m) in
     x86_64 | amd64) asset=clearway-x86_64-linux ;;

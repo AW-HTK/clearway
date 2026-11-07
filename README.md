@@ -18,16 +18,9 @@ the current user and without administrator rights:
 Run it again to update. A stopped WSL distribution is left alone: start it and run the setup again. Afterwards, restart
 the Claude Code and Codex sessions; in Codex, trust the Clearway hook once with `/hooks`.
 
-Without the setup, from a terminal:
-
-```powershell
-iex ([Text.Encoding]::UTF8.GetString((iwr -UseBasicParsing https://github.com/AW-HTK/clearway/releases/latest/download/install.ps1).Content).TrimStart([char]0xFEFF))  # Windows
-```
-```sh
-curl -fsSL https://github.com/AW-HTK/clearway/releases/latest/download/install.sh | sh  # each WSL distribution
-```
-
-Both scripts check the SHA-256 of what they download against `SHA256SUMS`.
+The release only carries `clearway-setup.exe` and its signed checksums (`SHA256SUMS`, `SHA256SUMS.sig`, used by the
+update check); the setup embeds everything else. `windows/install.ps1` and `install.sh` are what it runs; they also
+install from a local `dist/` folder (`CLEARWAY_SOURCE=<dist>`).
 
 ## Updates
 

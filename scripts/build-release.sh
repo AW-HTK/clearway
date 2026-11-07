@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds the release files into dist/: clearway.exe, clearway-x86_64-linux (static), the two install scripts, VERSION,
-# clearway-setup.exe (which embeds them), SHA256SUMS and its Ed25519 signature SHA256SUMS.sig.
+# clearway-setup.exe (which embeds them), SHA256SUMS and its Ed25519 signature SHA256SUMS.sig. Only the setup and the
+# two SHA256SUMS files are published.
 # Needs cargo-zigbuild, the targets x86_64-pc-windows-gnu and x86_64-unknown-linux-musl, and the signing seed in
 # CLEARWAY_RELEASE_SIGNING_KEY (for instance: bws-get run -- scripts/build-release.sh).
 set -eu
@@ -33,3 +34,4 @@ cp target/x86_64-pc-windows-gnu/release/clearway-setup.exe dist/
 (cd dist && sha256sum clearway-setup.exe >> SHA256SUMS)
 target/release/examples/sign_release sign dist/SHA256SUMS
 cat dist/SHA256SUMS
+echo "Publish: dist/clearway-setup.exe dist/SHA256SUMS dist/SHA256SUMS.sig"

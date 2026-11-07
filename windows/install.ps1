@@ -1,14 +1,16 @@
-﻿# Installs or updates Clearway for the current user, without administrator rights:
-# clearway.exe in %LOCALAPPDATA%\Programs\clearway, on the user PATH, started at logon by the 'Clearway' task.
-#   iex ([Text.Encoding]::UTF8.GetString((iwr -UseBasicParsing https://github.com/AW-HTK/clearway/releases/latest/download/install.ps1).Content).TrimStart([char]0xFEFF))
-# (decoded as UTF-8 by hand: Windows PowerShell would read this BOM-marked UTF-8 file as ANSI).
-# Variables for tests: CLEARWAY_SOURCE (URL or folder of the release files), CLEARWAY_INSTALL_DIR, CLEARWAY_NO_TASK,
-# CLEARWAY_NO_PATH, CLEARWAY_QUIET (no closing instructions, for clearway-setup).
+﻿# Installs or updates clearway.exe for the current user, without administrator rights: in
+# %LOCALAPPDATA%\Programs\clearway, on the user PATH, started at logon by the 'Clearway' task.
+# clearway-setup.exe runs it; to run it by hand, point CLEARWAY_SOURCE at a dist/ folder (scripts/build-release.sh).
+# Other variables: CLEARWAY_INSTALL_DIR, CLEARWAY_NO_TASK, CLEARWAY_NO_PATH, CLEARWAY_QUIET (no closing instructions).
 $ErrorActionPreference = 'Stop'
 $fr = (Get-UICulture).TwoLetterISOLanguageName -eq 'fr'
 function Say([string]$en, [string]$french) { if ($fr) { Write-Output $french } else { Write-Output $en } }
 
-$source = if ($env:CLEARWAY_SOURCE) { $env:CLEARWAY_SOURCE } else { 'https://github.com/AW-HTK/clearway/releases/latest/download' }
+if (-not $env:CLEARWAY_SOURCE) {
+    if ($fr) { throw 'Lancez clearway-setup.exe (https://github.com/AW-HTK/clearway/releases/latest), ou définissez CLEARWAY_SOURCE vers un dossier dist/.' }
+    throw 'Run clearway-setup.exe (https://github.com/AW-HTK/clearway/releases/latest), or set CLEARWAY_SOURCE to a dist/ folder.'
+}
+$source = $env:CLEARWAY_SOURCE
 $dir = if ($env:CLEARWAY_INSTALL_DIR) { $env:CLEARWAY_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\clearway' }
 $exe = Join-Path $dir 'clearway.exe'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -126,24 +128,4 @@ if (-not $env:CLEARWAY_NO_TASK) {
         throw "The 'Clearway' task is installed but Clearway $version did not answer within 20 s."
     }
     Say "Clearway $version is running (tray icon) and starts at each logon." "Clearway $version tourne (icône de la zone de notification) et démarre à chaque ouverture de session."
-}
-
-if (-not $env:CLEARWAY_QUIET) {
-Say @"
-
-Next steps:
-  WSL (in each distribution where AI sessions run):
-    curl -fsSL https://github.com/AW-HTK/clearway/releases/latest/download/install.sh | sh
-  Claude Code and Codex (in a new terminal, Windows and/or WSL):
-    claude plugin marketplace add AW-HTK/clearway; claude plugin install clearway@clearway --scope user
-    codex plugin marketplace add AW-HTK/clearway; codex plugin add clearway@clearway
-"@ @"
-
-Étapes suivantes :
-  WSL (dans chaque distribution où tournent des sessions d'IA) :
-    curl -fsSL https://github.com/AW-HTK/clearway/releases/latest/download/install.sh | sh
-  Claude Code et Codex (dans un nouveau terminal, Windows et/ou WSL) :
-    claude plugin marketplace add AW-HTK/clearway; claude plugin install clearway@clearway --scope user
-    codex plugin marketplace add AW-HTK/clearway; codex plugin add clearway@clearway
-"@
 }
