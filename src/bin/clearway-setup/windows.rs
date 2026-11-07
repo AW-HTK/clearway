@@ -9,8 +9,8 @@ use clearway::config::Config;
 use clearway::model::Status;
 use clearway::protocol::{DEFAULT_PIPE, Request, Response, read_line_limited};
 use clearway::setup::{
-    HookTrust, Probe, WSL_PROBE, codex_hooks_request, expand, find_files, hook_trust_from_config, hook_trust_from_list,
-    probe_result, sh_quote, wsl_names,
+    HookTrust, Installed, Probe, SessionCount, WSL_PROBE, compare_installed, count_sessions, codex_hooks_request, expand, find_files,
+    hook_trust_from_config, hook_trust_from_list, probe_result, sh_quote, wsl_names,
 };
 use clearway::tr;
 use serde_json::Value;
@@ -176,7 +176,7 @@ pub struct Outcome {
 /// What the "Verify" button found.
 pub struct Checks {
     /// Sessions linked to Clearway right now (Claude Code, Codex); `None` when Clearway does not answer.
-    pub sessions: Option<(usize, usize)>,
+    pub sessions: Option<(SessionCount, SessionCount)>,
     /// Trust of the hook in each place where the Codex plugin is installed.
     pub trust: Vec<(String, HookTrust)>,
 }
@@ -509,6 +509,12 @@ pub fn install_dir() -> PathBuf {
 /// Clearway for Windows is already installed: the setup offers to update or to uninstall.
 pub fn installed() -> bool {
     install_dir().join("clearway.exe").is_file()
+}
+
+pub fn installed_version() -> Installed {
+    let out = quiet(Command::new(install_dir().join("clearway.exe")).arg("--version")).filter(|(ok, _)| *ok);
+    let text = out.and_then(|(_, stdout)| String::from_utf8(stdout).ok());
+    compare_installed(text.as_deref(), env!("CARGO_PKG_VERSION"))
 }
 
 /// This setup is the copy kept next to clearway.exe, which cannot delete its own folder.
@@ -858,10 +864,8 @@ fn codex_trust(distro: Option<&str>, path: &str) -> HookTrust {
 
 /// Checks behind the "Verify" button, for the plugins installed by `actions`.
 pub fn check(actions: &[Action]) -> Checks {
-    let sessions = server_status().map(|s| {
-        let count = |prefix: &str| s.links.iter().filter(|l| l.client.starts_with(prefix)).count();
-        (count("claude"), count("codex"))
-    });
+    let version = env!("CARGO_PKG_VERSION");
+    let sessions = server_status().map(|s| (count_sessions(&s.links, "claude", version), count_sessions(&s.links, "codex", version)));
     let trust = actions
         .iter()
         .filter_map(|a| match a {
@@ -908,7 +912,17 @@ fn text_mode(uninstall: bool, yes: bool, purge: bool, verify: bool) -> i32 {
     if verify {
         let c = check(&actions);
         match c.sessions {
-            Some((claude, codex)) => println!("\n{}", tr!("Linked sessions: Claude Code {claude}, Codex {codex}", "Sessions liées : Claude Code {claude}, Codex {codex}")),
+            Some((claude, codex)) => println!(
+                "\n{}",
+                tr!(
+                    "Linked sessions: Claude Code {} (+{} old), Codex {} (+{} old)",
+                    "Sessions liées : Claude Code {} (+{} anciennes), Codex {} (+{} anciennes)",
+                    claude.current,
+                    claude.old,
+                    codex.current,
+                    codex.old
+                )
+            ),
             None => println!("\n{}", tr!("Clearway does not answer.", "Clearway ne répond pas.")),
         }
         for (place, t) in c.trust {

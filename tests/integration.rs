@@ -564,7 +564,7 @@ fn wsl_stop_frees_wsl_tickets() {
 #[test]
 fn relay_absent_then_automatic_launch() {
     let o = Orchestra::prepare("lancement");
-    let r = Command::new(env!("CARGO_BIN_EXE_clearway")).args(["relay", "--pipe", &o.pipe]).output().unwrap();
+    let r = Command::new(env!("CARGO_BIN_EXE_clearway")).args(["relay", "--pipe", &o.pipe]).env("CLEARWAY_LANG", "en").output().unwrap();
     assert_eq!(r.status.code(), Some(RELAY_ABSENT));
     assert!(text(&r.stderr).contains("relay: Clearway is not running"), "{}", text(&r.stderr));
 

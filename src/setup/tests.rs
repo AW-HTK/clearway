@@ -87,3 +87,28 @@ fn codex_trust_of_the_clearway_hook() {
 fn quoting_survives_single_quotes() {
     assert_eq!(sh_quote("/home/o'neil/bin/claude"), r"'/home/o'\''neil/bin/claude'");
 }
+
+#[test]
+fn sessions_are_counted_once_and_old_versions_apart() {
+    use crate::model::LinkView;
+    let link = |session: &str, client: &str| LinkView { session: session.into(), client: client.into() };
+    let links = [
+        link("Claude a", "claude mcp 0.1.2"),
+        link("Claude a", "claude mcp 0.1.2"),
+        link("Claude b", "claude mcp 0.1.1"),
+        link("Codex c", "codex mcp 0.1.2"),
+    ];
+    assert_eq!(count_sessions(&links, "claude", "0.1.2"), SessionCount { current: 1, old: 1 });
+    assert_eq!(count_sessions(&links, "codex", "0.1.2"), SessionCount { current: 1, old: 0 });
+    assert_eq!(count_sessions(&[], "codex", "0.1.2"), SessionCount::default());
+}
+
+#[test]
+fn installed_version_against_the_setup() {
+    assert_eq!(compare_installed(Some("clearway 0.1.2\r\n"), "0.1.3"), Installed::Older("0.1.2".into()));
+    assert_eq!(compare_installed(Some("clearway 0.1.3\n"), "0.1.3"), Installed::Same);
+    assert_eq!(compare_installed(Some("clearway 0.10.0"), "0.9.9"), Installed::Newer("0.10.0".into()));
+    assert_eq!(compare_installed(Some("clearway 0.2.0-rc.1"), "0.1.3"), Installed::Unknown);
+    assert_eq!(compare_installed(Some(""), "0.1.3"), Installed::Unknown);
+    assert_eq!(compare_installed(None, "0.1.3"), Installed::Unknown);
+}

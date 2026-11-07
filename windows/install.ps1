@@ -1,8 +1,9 @@
 ﻿# Installs or updates clearway.exe for the current user, without administrator rights: in
 # %LOCALAPPDATA%\Programs\clearway, on the user PATH, started at logon by the 'Clearway' task.
 # clearway-setup.exe runs it; to run it by hand, point CLEARWAY_SOURCE at a dist/ folder (scripts/build-release.sh).
-# Other variables: CLEARWAY_INSTALL_DIR, CLEARWAY_NO_TASK, CLEARWAY_NO_PATH, CLEARWAY_QUIET (no closing instructions),
-# CLEARWAY_SETUP_EXE (setup copied next to clearway.exe and registered in "Installed apps" as CLEARWAY_UNINSTALL_KEY).
+# Other variables: CLEARWAY_INSTALL_DIR, CLEARWAY_NO_TASK, CLEARWAY_NO_PATH, CLEARWAY_PIPE,
+# CLEARWAY_QUIET (no closing instructions), CLEARWAY_SETUP_EXE (setup copied next to clearway.exe and registered in
+# "Installed apps" as CLEARWAY_UNINSTALL_KEY).
 $ErrorActionPreference = 'Stop'
 $fr = (Get-UICulture).TwoLetterISOLanguageName -eq 'fr'
 function Say([string]$en, [string]$french) { if ($fr) { Write-Output $french } else { Write-Output $en } }
@@ -65,6 +66,8 @@ try {
     if ($expected -ne $actual) { throw "clearway.exe: SHA-256 $actual, expected $expected" }
 
     New-Item -ItemType Directory -Force $dir | Out-Null
+    # Left by an uninstallation that found the file locked.
+    Get-ChildItem $dir -Filter '*.deleted' | ForEach-Object { Remove-Item $_.FullName -ErrorAction SilentlyContinue }
     $server = Get-CimInstance Win32_Process -Filter "Name='clearway.exe'" |
         Where-Object { $_.ExecutablePath -eq $exe -and $_.CommandLine -notmatch '\brelay\b|\bmcp\b|\bhook\b' }
     $maintenance = Join-Path $env:LOCALAPPDATA 'clearway\maintenance'
@@ -97,8 +100,9 @@ if (-not $env:CLEARWAY_NO_PATH) {
     }
 }
 
+$pipe = if ($env:CLEARWAY_PIPE) { $env:CLEARWAY_PIPE } else { 'clearway' }
 function Send-Pipe([string]$request) {
-    $p = [IO.Pipes.NamedPipeClientStream]::new('.', 'clearway', [IO.Pipes.PipeDirection]::InOut); $p.Connect(1000)
+    $p = [IO.Pipes.NamedPipeClientStream]::new('.', $pipe, [IO.Pipes.PipeDirection]::InOut); $p.Connect(1000)
     try {
         $w = [IO.StreamWriter]::new($p); $w.AutoFlush = $true; $w.WriteLine($request)
         [IO.StreamReader]::new($p).ReadLine()
