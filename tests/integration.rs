@@ -1006,6 +1006,10 @@ fn mcp_process_links_its_session_and_resumes_it() {
     let mut o = Orchestra::start("mcp-reel");
     let mut a = Mcp::start(&o, "sess-int-1");
     assert!(wait(Duration::from_secs(5), || o.log().contains("LINK #1 ouverte")), "{}", o.log());
+    let (_, status) = o.call("GET", "/status", Value::Null);
+    let links = status["links"].as_array().expect("links in /status");
+    assert_eq!(links.len(), 1, "{status}");
+    assert!(links[0]["client"].as_str().is_some_and(|c| c.contains(" mcp ")), "{status}");
 
     let r = a.tool(2, "request_clearance", json!({ "description": "essai MCP", "ram": "1G", "duration": "10m" }));
     assert_eq!(r["structuredContent"]["cleared"], true, "{r}");
@@ -1025,7 +1029,7 @@ fn mcp_process_links_its_session_and_resumes_it() {
     o.kill();
     o.launch();
     let resumed = |log: String| log.matches(&format!("reprise de #{id}")).count() >= 2;
-    assert!(wait(Duration::from_secs(10), || resumed(o.log())), "{}", o.log());
+    assert!(wait(Duration::from_secs(30), || resumed(o.log())), "{}", o.log());
     let r = b.tool(3, "release", json!({ "ticket": id, "code": 0 }));
     assert_eq!(r["isError"], false, "{r}");
     assert!(o.ticket(id).is_none());

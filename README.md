@@ -13,13 +13,19 @@ the current user and without administrator rights:
 
 - `clearway.exe` in `%LOCALAPPDATA%\Programs\clearway`, on the user `PATH`, started at logon by the `Clearway` task;
 - the `clearway` client in `~/.local/bin` of each running WSL distribution;
-- the Clearway plugin in each Claude Code and Codex it found (see Plugins below).
+- the Clearway plugin in each Claude Code and Codex it found (see Plugins below), including the Claude and Codex desktop
+  apps on Windows, which share the configuration of the command line tools.
 
-Run it again to update. A stopped WSL distribution is left alone: start it and run the setup again. Afterwards, restart
-the Claude Code and Codex sessions; in Codex, trust the Clearway hook once with `/hooks`.
+Run it again to update. A stopped WSL distribution is left alone: start it and run the setup again. Its last page lists
+what is left to do, with a **Verify** button: restart the Claude Code and Codex sessions, and in Codex trust the Clearway
+hook once with `/hooks` (in the Codex app: Settings > Hooks).
+
+To uninstall, use **Installed apps** in the Windows settings, or run the setup again and choose **Uninstall**: it
+removes the plugins, the WSL clients, the task, the `PATH` entry and the folder, and keeps the settings and the log
+unless asked. `clearway-setup.exe --uninstall --yes` does it without the window.
 
 The release only carries `clearway-setup.exe` and its signed checksums (`SHA256SUMS`, `SHA256SUMS.sig`, used by the
-update check); the setup embeds everything else. `windows/install.ps1` and `install.sh` are what it runs; they also
+update check); the setup embeds everything else. `windows/install.ps1`, `windows/uninstall.ps1` and `install.sh` are what it runs; they also
 install from a local `dist/` folder (`CLEARWAY_SOURCE=<dist>`).
 
 ## Updates

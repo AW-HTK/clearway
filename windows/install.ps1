@@ -1,7 +1,8 @@
 ﻿# Installs or updates clearway.exe for the current user, without administrator rights: in
 # %LOCALAPPDATA%\Programs\clearway, on the user PATH, started at logon by the 'Clearway' task.
 # clearway-setup.exe runs it; to run it by hand, point CLEARWAY_SOURCE at a dist/ folder (scripts/build-release.sh).
-# Other variables: CLEARWAY_INSTALL_DIR, CLEARWAY_NO_TASK, CLEARWAY_NO_PATH, CLEARWAY_QUIET (no closing instructions).
+# Other variables: CLEARWAY_INSTALL_DIR, CLEARWAY_NO_TASK, CLEARWAY_NO_PATH, CLEARWAY_QUIET (no closing instructions),
+# CLEARWAY_SETUP_EXE (setup copied next to clearway.exe and registered in "Installed apps" as CLEARWAY_UNINSTALL_KEY).
 $ErrorActionPreference = 'Stop'
 $fr = (Get-UICulture).TwoLetterISOLanguageName -eq 'fr'
 function Say([string]$en, [string]$french) { if ($fr) { Write-Output $french } else { Write-Output $en } }
@@ -18,6 +19,33 @@ $exe = Join-Path $dir 'clearway.exe'
 function Fetch([string]$name, [string]$to) {
     if ($source -match '^https?://') { Invoke-WebRequest -UseBasicParsing -Uri "$source/$name" -OutFile $to }
     else { Copy-Item (Join-Path $source $name) $to }
+}
+
+# Entry of "Installed apps": a copy of the setup next to clearway.exe uninstalls (--uninstall) or updates (Modify).
+function Register-Uninstall([string]$setup) {
+    $copy = Join-Path $dir 'clearway-setup.exe'
+    if ([IO.Path]::GetFullPath($setup) -ne [IO.Path]::GetFullPath($copy)) {
+        $next = Join-Path $dir '.clearway-setup.new.exe'
+        Copy-Item $setup $next -Force
+        if (Test-Path $copy) {
+            Get-ChildItem $dir -Filter 'clearway-setup.old-*.exe' | ForEach-Object { Remove-Item $_.FullName -ErrorAction SilentlyContinue }
+            Rename-Item $copy ("clearway-setup.old-{0:yyyyMMdd-HHmmss}.exe" -f (Get-Date))
+        }
+        Rename-Item $next 'clearway-setup.exe'
+    }
+    $name = if ($env:CLEARWAY_UNINSTALL_KEY) { $env:CLEARWAY_UNINSTALL_KEY } else { 'Clearway' }
+    $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$name"
+    New-Item -Path $key -Force | Out-Null
+    $size = [int]((Get-ChildItem $dir -File | Measure-Object Length -Sum).Sum / 1KB)
+    $values = [ordered]@{
+        DisplayName = 'Clearway'; DisplayVersion = $version; Publisher = 'AW-HTK'; DisplayIcon = "$exe,0"
+        InstallLocation = $dir; URLInfoAbout = 'https://github.com/AW-HTK/clearway'
+        UninstallString = "`"$copy`" --uninstall"; QuietUninstallString = "`"$copy`" --uninstall --yes"
+        ModifyPath = "`"$copy`""; InstallDate = (Get-Date -Format 'yyyyMMdd')
+    }
+    foreach ($v in $values.GetEnumerator()) { New-ItemProperty -Path $key -Name $v.Key -Value $v.Value -PropertyType String -Force | Out-Null }
+    New-ItemProperty -Path $key -Name EstimatedSize -Value $size -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $key -Name NoRepair -Value 1 -PropertyType DWord -Force | Out-Null
 }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("clearway-install-" + [Guid]::NewGuid().ToString('N'))
@@ -54,6 +82,7 @@ try {
     }
     Move-Item $new $exe
     Say "clearway.exe $version installed in $dir." "clearway.exe $version installé dans $dir."
+    if ($env:CLEARWAY_SETUP_EXE) { Register-Uninstall $env:CLEARWAY_SETUP_EXE }
 } finally {
     Get-ChildItem $tmp -File -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
     Remove-Item $tmp -ErrorAction SilentlyContinue
