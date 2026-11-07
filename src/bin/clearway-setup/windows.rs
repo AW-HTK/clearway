@@ -1,14 +1,18 @@
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 
+use clearway::config::Config;
 use clearway::setup::{WSL_PROBE, probe_result, sh_quote, wsl_names};
 use clearway::tr;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MARKETPLACE: &str = "AW-HTK/clearway";
 const PLUGIN: &str = "clearway@clearway";
+/// Among a tool's plugin commands, the one that must succeed (install).
+const INSTALL_COMMAND: usize = 2;
 
 const FILES: [(&str, &[u8]); 6] = [
     ("clearway.exe", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/clearway.exe"))),
@@ -19,14 +23,14 @@ const FILES: [(&str, &[u8]); 6] = [
     ("VERSION", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/VERSION"))),
 ];
 
-#[derive(Clone, Copy, PartialEq)]
-enum Tool {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Tool {
     Claude,
     Codex,
 }
 
 impl Tool {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Tool::Claude => "Claude Code",
             Tool::Codex => "Codex",
@@ -34,28 +38,47 @@ impl Tool {
     }
 
     /// Shell commands, `{t}` being the program: add the marketplace, refresh it, install or update the plugin.
-    fn commands(self) -> [String; 4] {
+    fn commands(self) -> Vec<String> {
         match self {
-            Tool::Claude => [
+            Tool::Claude => vec![
                 format!("{{t}} plugin marketplace add {MARKETPLACE}"),
                 "{t} plugin marketplace update clearway".into(),
                 format!("{{t}} plugin install {PLUGIN} --scope user"),
                 format!("{{t}} plugin update {PLUGIN}"),
             ],
-            Tool::Codex => [
+            Tool::Codex => vec![
                 format!("{{t}} plugin marketplace add {MARKETPLACE}"),
                 "{t} plugin marketplace upgrade clearway".into(),
                 format!("{{t}} plugin add {PLUGIN}"),
-                String::new(),
             ],
         }
     }
 }
 
-struct Found {
-    /// `None`: Windows itself.
-    distro: Option<String>,
-    tools: Vec<(Tool, String)>,
+#[derive(Clone, Debug)]
+pub enum Action {
+    Windows,
+    Wsl(String),
+    Plugin { distro: Option<String>, tool: Tool, path: String },
+}
+
+/// One line of the plan: an action the user may untick, or an information without action.
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub label: String,
+    pub detail: String,
+    pub action: Option<Action>,
+    pub checked: bool,
+    /// Cannot be unticked (Clearway itself).
+    pub locked: bool,
+    /// Index of the row this one needs (a plugin needs its distribution's client).
+    pub needs: Option<usize>,
+}
+
+pub enum Event {
+    Step { index: usize, total: usize, title: String },
+    Line(String),
+    StepDone { ok: bool },
 }
 
 fn quiet(cmd: &mut Command) -> Option<(bool, Vec<u8>)> {
@@ -89,83 +112,124 @@ fn desktop_apps() -> Vec<&'static str> {
         .collect()
 }
 
-fn scan() -> (Vec<Found>, Vec<String>) {
-    let mut found = vec![Found {
-        distro: None,
-        tools: [(Tool::Claude, "claude"), (Tool::Codex, "codex")]
-            .into_iter()
-            .filter_map(|(t, p)| windows_tool(p).map(|p| (t, p)))
-            .collect(),
+fn place(distro: Option<&str>) -> String {
+    distro.map_or_else(|| "Windows".to_owned(), |d| format!("WSL {d}"))
+}
+
+fn info(label: String, detail: String) -> Row {
+    Row { label, detail, action: None, checked: false, locked: true, needs: None }
+}
+
+/// Looks at the machine without changing anything and lists what the setup proposes.
+pub fn plan() -> Vec<Row> {
+    let mut rows = vec![Row {
+        label: tr!("Clearway for Windows", "Clearway pour Windows"),
+        detail: tr!(
+            "The queue itself, with its icon next to the clock. Required.",
+            "La file elle-même, avec son icône près de l'horloge. Indispensable."
+        ),
+        action: Some(Action::Windows),
+        checked: true,
+        locked: true,
+        needs: None,
     }];
+    let plugin_detail = || {
+        tr!(
+            "Waits for its turn before a heavy task; a guard stops the ones started without waiting.",
+            "Attend son tour avant une tâche lourde ; une garde bloque celles lancées sans attendre."
+        )
+    };
+    for (tool, program) in [(Tool::Claude, "claude"), (Tool::Codex, "codex")] {
+        if let Some(path) = windows_tool(program) {
+            rows.push(Row {
+                label: format!("{} (Windows)", tool.name()),
+                detail: plugin_detail(),
+                action: Some(Action::Plugin { distro: None, tool, path }),
+                checked: true,
+                locked: false,
+                needs: Some(0),
+            });
+        }
+    }
     let running = distros(true);
     for d in &running {
         let out = quiet(Command::new("wsl.exe").args(["-d", d, "--exec", "sh", "-c", WSL_PROBE])).map(|(_, o)| o).unwrap_or_default();
         let (claude, codex) = probe_result(&String::from_utf8_lossy(&out));
-        let tools = [(Tool::Claude, claude), (Tool::Codex, codex)].into_iter().filter_map(|(t, p)| p.map(|p| (t, p))).collect();
-        found.push(Found { distro: Some(d.clone()), tools });
-    }
-    let stopped = distros(false).into_iter().filter(|d| !running.contains(d)).collect();
-    (found, stopped)
-}
-
-fn place(f: &Found) -> String {
-    f.distro.as_ref().map_or_else(|| "Windows".to_owned(), |d| format!("WSL {d}"))
-}
-
-fn print_plan(found: &[Found], stopped: &[String], apps: &[&str]) {
-    println!("{}", tr!("Clearway {} will be installed for this user:", "Clearway {} va être installé pour cet utilisateur :", env!("CARGO_PKG_VERSION")));
-    println!(
-        "{}",
-        tr!(
-            "  [x] Windows: clearway.exe in %LOCALAPPDATA%\\Programs\\clearway, on your PATH, started at logon (tray icon).",
-            "  [x] Windows : clearway.exe dans %LOCALAPPDATA%\\Programs\\clearway, dans votre PATH, lancé à l'ouverture de session (icône)."
-        )
-    );
-    for f in found.iter().filter(|f| f.distro.is_some()) {
-        println!("{}", tr!("  [x] {}: clearway client in ~/.local/bin (distribution running).", "  [x] {} : client clearway dans ~/.local/bin (distribution démarrée).", place(f)));
-    }
-    for f in found {
-        for (tool, path) in &f.tools {
-            println!(
-                "{}",
-                tr!(
-                    "  [x] {} on {} ({path} found): Clearway plugin (wait tool, heavy-task guidance, guard before heavy commands).",
-                    "  [x] {} sur {} ({path} trouvé) : plugin Clearway (outil d'attente, consigne des tâches lourdes, garde avant les commandes lourdes).",
-                    tool.name(),
-                    place(f)
-                )
-            );
+        let client = rows.len();
+        rows.push(Row {
+            label: tr!("Clearway in WSL {d}", "Clearway dans WSL {d}"),
+            detail: tr!(
+                "The clearway command, used by the sessions of this distribution.",
+                "La commande clearway, utilisée par les sessions de cette distribution."
+            ),
+            action: Some(Action::Wsl(d.clone())),
+            checked: true,
+            locked: false,
+            needs: None,
+        });
+        for (tool, path) in [(Tool::Claude, claude), (Tool::Codex, codex)] {
+            if let Some(path) = path {
+                rows.push(Row {
+                    label: format!("{} ({})", tool.name(), place(Some(d))),
+                    detail: plugin_detail(),
+                    action: Some(Action::Plugin { distro: Some(d.clone()), tool, path }),
+                    checked: true,
+                    locked: false,
+                    needs: Some(client),
+                });
+            }
         }
     }
-    if found.iter().all(|f| f.tools.is_empty()) {
-        println!("{}", tr!("  [ ] No Claude Code or Codex found: install one, then run this setup again.", "  [ ] Aucun Claude Code ni Codex trouvé : installez-en un, puis relancez cette installation."));
-    }
-    let windows_cli = found.iter().find(|f| f.distro.is_none()).map_or(&[][..], |f| &f.tools[..]);
+    let has_windows_cli = |t: Tool| rows.iter().any(|r| matches!(&r.action, Some(Action::Plugin { distro: None, tool, .. }) if *tool == t));
+    let apps: Vec<&str> = desktop_apps()
+        .into_iter()
+        .filter(|app| !has_windows_cli(if *app == "Claude" { Tool::Claude } else { Tool::Codex }))
+        .collect();
     for app in apps {
-        let tool = if *app == "Claude" { Tool::Claude } else { Tool::Codex };
-        if windows_cli.iter().all(|(t, _)| *t != tool) {
-            println!(
-                "{}",
-                tr!(
-                    "  [ ] {app} desktop app (Windows): no command line to install from; in the app, add the plugin marketplace {MARKETPLACE}, then install the clearway plugin.",
-                    "  [ ] Application {app} (Windows) : pas de ligne de commande pour l'installer ; dans l'application, ajoutez le marketplace de plugins {MARKETPLACE}, puis installez le plugin clearway."
-                )
-            );
-        }
+        rows.push(info(
+            tr!("{app} app (Windows)", "Application {app} (Windows)"),
+            tr!(
+                "In the app, add the plugin marketplace {MARKETPLACE}, then the clearway plugin.",
+                "Dans l'application, ajoutez le marketplace {MARKETPLACE}, puis le plugin clearway."
+            ),
+        ));
     }
-    for d in stopped {
-        println!("{}", tr!("  [ ] WSL {d}: stopped, not touched. Start it and run this setup again to include it.", "  [ ] WSL {d} : arrêtée, non modifiée. Démarrez-la et relancez cette installation pour l'inclure."));
+    for d in distros(false).into_iter().filter(|d| !running.contains(d)) {
+        rows.push(info(
+            tr!("WSL {d} (stopped)", "WSL {d} (arrêtée)"),
+            tr!("Not changed: start it, then run this setup again.", "Non modifiée : démarrez-la, puis relancez l'installation."),
+        ));
     }
+    if !rows.iter().any(|r| matches!(r.action, Some(Action::Plugin { .. }))) {
+        rows.push(info(
+            tr!("No Claude Code or Codex found", "Aucun Claude Code ni Codex trouvé"),
+            tr!("Install one, then run this setup again.", "Installez-en un, puis relancez l'installation."),
+        ));
+    }
+    rows
 }
 
-fn confirm() -> bool {
-    print!("{}", tr!("\nInstall? [Y/n] ", "\nInstaller ? [O/n] "));
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin().lock().read_line(&mut line).is_err() {
-        return false;
+fn state_dir() -> PathBuf {
+    PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("clearway")
+}
+
+/// Current `update.check` of the installed Clearway (off when not installed yet).
+pub fn daily_check_enabled() -> bool {
+    Config::load(&state_dir(), false).is_ok_and(|c| c.update_check_daily)
+}
+
+fn save_daily_check(daily: bool) -> Result<(), String> {
+    let dir = state_dir();
+    if !daily && !dir.join("config.toml").exists() {
+        return Ok(());
     }
-    !matches!(line.trim().chars().next(), Some('n' | 'N'))
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut config = Config::load(&dir, true)?;
+    if config.update_check_daily != daily {
+        config.update_check_daily = daily;
+        std::fs::write(dir.join("config.toml"), config.render()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn unpack() -> std::io::Result<PathBuf> {
@@ -184,68 +248,144 @@ fn clean(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
-fn step(title: &str, cmd: &mut Command) -> bool {
-    println!("\n== {title}");
-    let ok = cmd.status().is_ok_and(|s| s.success());
-    if !ok {
-        println!("{}", tr!("   FAILED: {title}", "   ÉCHEC : {title}"));
-    }
-    ok
-}
-
-fn windows_part(dir: &Path) -> bool {
-    let script = dir.join("install.ps1");
-    step(
-        &tr!("Windows: clearway.exe", "Windows : clearway.exe"),
-        Command::new("powershell.exe")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-            .arg(&script)
-            .env("CLEARWAY_SOURCE", dir)
-            .env("CLEARWAY_QUIET", "1"),
-    )
-}
-
-fn wsl_part(distro: &str, dir: &Path) -> bool {
-    step(
-        &tr!("WSL {distro}: clearway client", "WSL {distro} : client clearway"),
-        Command::new("wsl.exe")
-            .args(["-d", distro, "--exec", "sh", "-c", r#"src=$(wslpath -u "$1") && CLEARWAY_SOURCE="$src" sh "$src/install.sh""#, "clearway-setup"])
-            .arg(dir),
-    )
-}
-
-/// Runs the plugin commands of `tool`; only the install command must succeed.
-fn plugin_part(f: &Found, tool: Tool, path: &str) -> bool {
-    println!("\n== {}", tr!("{} on {}: Clearway plugin", "{} sur {} : plugin Clearway", tool.name(), place(f)));
-    let [add, refresh, install, update] = tool.commands();
-    let mut ok = true;
-    for (i, line) in [add, refresh, install, update].iter().enumerate().filter(|(_, l)| !l.is_empty()) {
-        let status = match &f.distro {
-            None => Command::new("cmd.exe").args(["/d", "/c", &line.replace("{t}", path)]).status(),
-            Some(d) => {
-                let line = line.replace("{t}", &sh_quote(path));
-                Command::new("wsl.exe").args(["-d", d, "--exec", "sh", "-c", r#"exec "${SHELL:-sh}" -lc "$1""#, "clearway-setup", &line]).status()
+/// Drops terminal colour codes and carriage returns from a child's output line.
+fn plain(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
             }
-        };
-        if i == 2 && !status.is_ok_and(|s| s.success()) {
-            println!("{}", tr!("   FAILED: plugin not installed", "   ÉCHEC : plugin non installé"));
-            ok = false;
+        } else if c != '\r' {
+            out.push(c);
         }
     }
-    ok
+    out
 }
 
-fn pause() {
-    print!("{}", tr!("\nPress Enter to close.", "\nAppuyez sur Entrée pour fermer."));
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stdin().lock().read_line(&mut String::new());
+/// Runs `cmd` without a console window, passing each output line to `emit`.
+fn run(cmd: &mut Command, emit: &dyn Fn(Event)) -> bool {
+    let spawned = cmd.creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            emit(Event::Line(e.to_string()));
+            return false;
+        }
+    };
+    let (tx, rx) = mpsc::channel::<String>();
+    let streams: Vec<Box<dyn Read + Send>> = [
+        child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>),
+        child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let readers: Vec<_> = streams
+        .into_iter()
+        .map(|stream| {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stream).split(b'\n').map_while(Result::ok) {
+                    let _ = tx.send(plain(&String::from_utf8_lossy(&line)));
+                }
+            })
+        })
+        .collect();
+    drop(tx);
+    for line in rx {
+        if !line.trim().is_empty() {
+            emit(Event::Line(line));
+        }
+    }
+    for r in readers {
+        let _ = r.join();
+    }
+    child.wait().is_ok_and(|s| s.success())
 }
 
-pub fn main() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let yes = args.iter().any(|a| a == "--yes");
-    let dry = args.iter().any(|a| a == "--dry-run");
-    let interactive = args.is_empty();
+fn title(action: &Action) -> String {
+    match action {
+        Action::Windows => tr!("Installing Clearway for Windows", "Installation de Clearway pour Windows"),
+        Action::Wsl(d) => tr!("Installing Clearway in WSL {d}", "Installation de Clearway dans WSL {d}"),
+        Action::Plugin { distro, tool, .. } => {
+            tr!("Adding the plugin to {} ({})", "Ajout du plugin à {} ({})", tool.name(), place(distro.as_deref()))
+        }
+    }
+}
+
+fn apply(action: &Action, dir: &Path, emit: &dyn Fn(Event)) -> bool {
+    match action {
+        Action::Windows => {
+            let script = dir.join("install.ps1").display().to_string().replace('\'', "''");
+            run(
+                Command::new("powershell.exe")
+                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
+                    .arg(format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; & '{script}'"))
+                    .env("CLEARWAY_SOURCE", dir)
+                    .env("CLEARWAY_QUIET", "1"),
+                emit,
+            )
+        }
+        Action::Wsl(d) => run(
+            Command::new("wsl.exe")
+                .args(["-d", d, "--exec", "sh", "-c", r#"src=$(wslpath -u "$1") && CLEARWAY_SOURCE="$src" sh "$src/install.sh""#, "clearway-setup"])
+                .arg(dir),
+            emit,
+        ),
+        Action::Plugin { distro, tool, path } => {
+            let mut ok = true;
+            for (i, line) in tool.commands().iter().enumerate() {
+                let done = match distro {
+                    None => run(Command::new("cmd.exe").args(["/d", "/c", &line.replace("{t}", path)]), emit),
+                    Some(d) => {
+                        let line = line.replace("{t}", &sh_quote(path));
+                        run(Command::new("wsl.exe").args(["-d", d, "--exec", "sh", "-c", r#"exec "${SHELL:-sh}" -lc "$1""#, "clearway-setup", &line]), emit)
+                    }
+                };
+                if i == INSTALL_COMMAND && !done {
+                    ok = false;
+                }
+            }
+            ok
+        }
+    }
+}
+
+/// Installs the ticked actions in order; returns the titles of the steps that failed.
+pub fn install(actions: &[Action], daily: bool, emit: &dyn Fn(Event)) -> Vec<String> {
+    if let Err(e) = save_daily_check(daily) {
+        emit(Event::Line(tr!("config.toml: {e}", "config.toml : {e}")));
+    }
+    let dir = match unpack() {
+        Ok(d) => d,
+        Err(e) => {
+            emit(Event::Line(tr!("Cannot write the setup files: {e}", "Impossible d'écrire les fichiers d'installation : {e}")));
+            return vec![tr!("setup files", "fichiers d'installation")];
+        }
+    };
+    let mut failures = Vec::new();
+    for (index, action) in actions.iter().enumerate() {
+        let t = title(action);
+        emit(Event::Step { index, total: actions.len(), title: t.clone() });
+        let ok = apply(action, &dir, emit);
+        emit(Event::StepDone { ok });
+        if !ok {
+            failures.push(t);
+        }
+    }
+    clean(&dir);
+    failures
+}
+
+/// The language reaches install.sh in WSL through WSLENV.
+fn share_language() {
     let lang = match clearway::i18n::current() {
         clearway::i18n::Lang::Fr => "fr",
         clearway::i18n::Lang::En => "en",
@@ -256,67 +396,45 @@ pub fn main() -> i32 {
         std::env::set_var("CLEARWAY_LANG", lang);
         std::env::set_var("WSLENV", wslenv);
     }
+}
 
+fn text_mode(yes: bool) -> i32 {
     println!("{}", tr!("Looking for WSL, Claude Code and Codex (nothing is changed yet)…\n", "Recherche de WSL, Claude Code et Codex (rien n'est encore modifié)…\n"));
-    let (found, stopped) = scan();
-    print_plan(&found, &stopped, &desktop_apps());
-    if dry || !(yes || confirm()) {
-        if !dry {
-            println!("{}", tr!("Nothing installed.", "Rien n'a été installé."));
-        }
-        if interactive {
-            pause();
-        }
+    let rows = plan();
+    for r in &rows {
+        let mark = if r.action.is_some() && r.checked { "x" } else { " " };
+        println!("  [{mark}] {} : {}", r.label, r.detail);
+    }
+    if !yes {
         return 0;
     }
-
-    let dir = match unpack() {
-        Ok(d) => d,
-        Err(e) => {
-            println!("{}", tr!("Cannot write the setup files: {e}", "Impossible d'écrire les fichiers d'installation : {e}"));
-            if interactive {
-                pause();
-            }
-            return 1;
-        }
-    };
-    let mut failures = Vec::new();
-    if !windows_part(&dir) {
-        failures.push("Windows".to_owned());
-    }
-    for f in found.iter() {
-        if let Some(d) = &f.distro
-            && !wsl_part(d, &dir)
-        {
-            failures.push(place(f));
-        }
-    }
-    for f in &found {
-        for (tool, path) in &f.tools {
-            if !plugin_part(f, *tool, path) {
-                failures.push(format!("{} ({})", tool.name(), place(f)));
-            }
-        }
-    }
-    clean(&dir);
-
+    let actions: Vec<Action> = rows.into_iter().filter(|r| r.checked).filter_map(|r| r.action).collect();
+    let failures = install(&actions, daily_check_enabled(), &|e| match e {
+        Event::Step { title, .. } => println!("\n== {title}"),
+        Event::Line(l) => println!("{l}"),
+        Event::StepDone { ok: false } => println!("{}", tr!("   FAILED", "   ÉCHEC")),
+        Event::StepDone { ok: true } => {}
+    });
     println!();
     if failures.is_empty() {
         println!("{}", tr!("Clearway is installed.", "Clearway est installé."));
+        0
     } else {
         println!("{}", tr!("Done, with failures: {}.", "Terminé, avec des échecs : {}.", failures.join(", ")));
+        1
     }
-    println!(
-        "{}",
-        tr!(
-            "Open a new terminal, then restart your Claude Code and Codex sessions so that they load the plugin. In Codex, \
-             type /hooks once and trust Clearway's hook.",
-            "Ouvrez un nouveau terminal, puis relancez vos sessions Claude Code et Codex pour qu'elles chargent le plugin. \
-             Dans Codex, tapez /hooks une fois et approuvez le hook de Clearway."
-        )
-    );
-    if interactive {
-        pause();
+}
+
+pub fn main() -> i32 {
+    share_language();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let yes = args.iter().any(|a| a == "--yes");
+    if yes || args.iter().any(|a| a == "--dry-run") {
+        // A GUI program: write to the console of the terminal that started it, if any.
+        unsafe { windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS) };
+        let code = text_mode(yes);
+        let _ = std::io::stdout().flush();
+        return code;
     }
-    i32::from(!failures.is_empty())
+    crate::gui::run()
 }
