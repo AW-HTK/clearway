@@ -42,6 +42,8 @@ pub fn utc_time(secs: u64) -> LocalTime {
 
 #[cfg(unix)]
 pub fn local_time(secs: u64) -> LocalTime {
+    // musl deprecates the alias for a future change; it is already 64-bit on x86_64.
+    #[allow(deprecated)]
     let t = secs as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {

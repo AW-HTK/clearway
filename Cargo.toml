@@ -9,6 +9,15 @@ license = "MIT"
 name = "clearway"
 path = "src/lib.rs"
 
+[features]
+# Builds clearway-setup, which embeds the release files of dist/ (scripts/build-release.sh).
+setup = []
+
+[[bin]]
+name = "clearway-setup"
+path = "src/bin/clearway-setup/main.rs"
+required-features = ["setup"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

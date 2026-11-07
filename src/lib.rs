@@ -9,5 +9,6 @@ pub mod model;
 pub mod protocol;
 pub mod scheduler;
 pub mod session;
+pub mod setup;
 pub mod system;
 pub mod tools;

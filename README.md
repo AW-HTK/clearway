@@ -5,7 +5,34 @@ Windows + WSL machine, so that they do not exhaust the RAM together. `clearway.e
 window) grants slots in arrival order with backfilling; sessions ask for them with the `clearway` client (WSL).
 Messages are in English or French.
 
+## Install (Windows 10/11, with or without WSL)
+
+Download `clearway-setup.exe` from the [latest release](https://github.com/AW-HTK/clearway/releases/latest) and run
+it. It looks for WSL distributions, Claude Code and Codex, shows what it will do and asks once; then it installs, for
+the current user and without administrator rights:
+
+- `clearway.exe` in `%LOCALAPPDATA%\Programs\clearway`, on the user `PATH`, started at logon by the `Clearway` task;
+- the `clearway` client in `~/.local/bin` of each running WSL distribution;
+- the Clearway plugin in each Claude Code and Codex it found (see Plugins below).
+
+Run it again to update. A stopped WSL distribution is left alone: start it and run the setup again. Afterwards, restart
+the Claude Code and Codex sessions; in Codex, trust the Clearway hook once with `/hooks`.
+
+Without the setup, from a terminal:
+
+```powershell
+irm https://github.com/AW-HTK/clearway/releases/latest/download/install.ps1 | iex     # Windows (PowerShell)
+```
+```sh
+curl -fsSL https://github.com/AW-HTK/clearway/releases/latest/download/install.sh | sh  # each WSL distribution
+```
+
+Both scripts check the SHA-256 of what they download against `SHA256SUMS`.
+
 ## Build
+
+`scripts/build-release.sh` builds every release file into `dist/` (needs cargo-zigbuild and the targets
+`x86_64-pc-windows-gnu` and `x86_64-unknown-linux-musl`). For development:
 
 ```sh
 export PATH=$HOME/.cargo/bin:$(echo ~/.local/share/uv/tools/cargo-zigbuild/lib/python*/site-packages/ziglang):$PATH
@@ -46,8 +73,8 @@ In Claude Code the tools are named `mcp__plugin_clearway_clearway__<tool>`. Code
 
 ## Files
 
-- Exe: `%LOCALAPPDATA%\Programs\clearway\clearway.exe`; scheduled task `Clearway` (`windows/install-task.ps1`),
-  updates with `windows/reinstall.ps1`.
+- Exe: `%LOCALAPPDATA%\Programs\clearway\clearway.exe`; scheduled task `Clearway`; installed and updated by
+  `windows/install.ps1` (or `clearway-setup.exe`, which runs it).
 - State: `%LOCALAPPDATA%\clearway\` (`state.json`, `clearway.log`, `config.toml` written at first start).
 - `config.toml`: `pipe`, `legacy_pipe`, `language` (`en`, `fr`, `auto`), reserves, margins, default needs, delays,
   backfill and swap thresholds; the file written at first start documents every key.
@@ -79,7 +106,7 @@ In Claude Code the tools are named `mcp__plugin_clearway_clearway__<tool>`. Code
   accepts `relais --tube`.
 - First start: `%LOCALAPPDATA%\orchestrateur\` is copied to `%LOCALAPPDATA%\clearway\` (old folder kept, with
   `MIGRATED-TO-CLEARWAY.txt`); `etat.json` becomes `state.json`, a French `config.toml` is rewritten in English (backup
-  `config.toml.before-clearway`). One-time switch: `windows/migrate-to-clearway.ps1`.
+  `config.toml.before-clearway`).
 
 ## Tests on real Windows (test instance, nothing on screen)
 
