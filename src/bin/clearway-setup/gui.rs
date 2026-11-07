@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 
-use clearway::setup::{HookTrust, Installed, SessionCount};
+use clearway::setup::{HookTrust, Installed, Sessions, old_sessions_list};
 use clearway::tr;
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -131,7 +131,7 @@ struct Ui {
     current: usize,
     outcomes: Vec<(Action, bool)>,
     /// Last steps: what the line asks, its mark and its state label.
-    last: Vec<(Reopen, usize, usize)>,
+    last: Vec<(Reopen, usize, usize, usize)>,
     busy: bool,
     success: bool,
     details_shown: bool,
@@ -636,7 +636,14 @@ fn show_last() {
             } else {
                 tr!("Restart your {} sessions", "Relancez vos sessions {}", tool.name())
             };
-            lines.push((kind, title, tr!("Sessions already open do not see Clearway.", "Les sessions déjà ouvertes ne voient pas Clearway.")));
+            lines.push((
+                kind,
+                title,
+                tr!(
+                    "A session opened before this installation or update must be restarted to use it.",
+                    "Une session ouverte avant cette installation ou mise à jour doit être relancée pour l'utiliser."
+                ),
+            ));
         }
     }
     if installed(Tool::Codex) {
@@ -654,9 +661,9 @@ fn show_last() {
     for (kind, title, detail) in lines {
         let m = label(TODO, MARK, (MARGIN, y, 24, 24), GREY);
         label(&title, BODY, (MARGIN + 30, y + 1, INNER - 30, 24), INK);
-        label(&detail, SMALL, (MARGIN + 30, y + 26, INNER - 30, 34), GREY);
+        let detail = label(&detail, SMALL, (MARGIN + 30, y + 26, INNER - 30, 34), GREY);
         let state = label("", SMALL, (MARGIN + 30, y + 60, INNER - 30, 18), GREY);
-        last.push((kind, m, state));
+        last.push((kind, m, detail, state));
         y += 88;
     }
     with_mut(|u| u.last = last);
@@ -670,7 +677,7 @@ fn show_last() {
 fn start_check() {
     let (hwnd, left, last, outcomes) = with(|u| (u.hwnd, u.left, u.last.clone(), u.outcomes.clone()));
     enable(left, false);
-    for (_, _, state) in &last {
+    for (_, _, _, state) in &last {
         set_text(*state, &tr!("Verifying…", "Vérification…"));
         set_color(*state, GREY);
     }
@@ -681,19 +688,30 @@ fn start_check() {
     });
 }
 
-/// Done once every linked session runs this version's plugin.
-fn sessions_state(n: SessionCount) -> (Option<bool>, String) {
-    let linked = |k: usize| if k == 1 { tr!("1 session linked", "1 session connectée") } else { tr!("{k} sessions linked", "{k} sessions connectées") };
-    match (n.current, n.old) {
-        (0, 0) => (Some(false), tr!("no session linked yet", "aucune session connectée pour l'instant")),
-        (k, 0) => (Some(true), linked(k)),
-        (k, old) => (
+/// Done once every linked session runs this version: (done, detail naming the sessions to restart, state).
+fn sessions_state(s: &Sessions, tool: &str) -> (Option<bool>, String, String) {
+    let version = env!("CARGO_PKG_VERSION");
+    let up_to_date = |k: usize| {
+        if k == 1 { tr!("1 session up to date ({version})", "1 session à jour ({version})") } else { tr!("{k} sessions up to date ({version})", "{k} sessions à jour ({version})") }
+    };
+    match (s.current, s.old.len()) {
+        (0, 0) => (
             Some(false),
+            tr!("No {tool} session sees Clearway yet: open a new one.", "Aucune session {tool} ne voit encore Clearway : ouvrez-en une nouvelle."),
+            tr!("no session linked yet", "aucune session connectée pour l'instant"),
+        ),
+        (k, 0) => (
+            Some(true),
             tr!(
-                "{} · {old} still on an older version: restart it",
-                "{} · {old} encore sur une ancienne version : à relancer",
-                if k == 0 { tr!("none up to date", "aucune à jour") } else { linked(k) }
+                "Every linked session runs this version. A session opened before the installation is not listed: restart it if any is left.",
+                "Toutes les sessions connectées utilisent cette version. Une session ouverte avant l'installation n'apparaît pas : relancez-la s'il en reste."
             ),
+            up_to_date(k),
+        ),
+        (k, n) => (
+            Some(false),
+            tr!("Still on an older version, to restart: {}", "Encore sur une ancienne version, à relancer : {}", old_sessions_list(&s.old, 3)),
+            format!("{} · {}", up_to_date(k), if n == 1 { tr!("1 to restart", "1 à relancer") } else { tr!("{n} to restart", "{n} à relancer") }),
         ),
     }
 }
@@ -704,11 +722,16 @@ fn on_checked(c: Checks) {
         return;
     }
     enable(left, true);
-    for (kind, m, state) in last {
+    for (kind, m, detail, state) in last {
         let (done, text) = match kind {
-            Reopen::Claude | Reopen::Codex => match c.sessions {
+            Reopen::Claude | Reopen::Codex => match &c.sessions {
                 None => (None, tr!("Clearway does not answer: look at its icon next to the clock.", "Clearway ne répond pas : regardez son icône près de l'horloge.")),
-                Some((claude, codex)) => sessions_state(if kind == Reopen::Claude { claude } else { codex }),
+                Some((claude, codex)) => {
+                    let (s, tool) = if kind == Reopen::Claude { (claude, Tool::Claude) } else { (codex, Tool::Codex) };
+                    let (done, what, text) = sessions_state(s, tool.name());
+                    set_text(detail, &what);
+                    (done, text)
+                }
             },
             Reopen::CodexGuard => {
                 let all = !c.trust.is_empty() && c.trust.iter().all(|(_, t)| *t == HookTrust::Trusted);

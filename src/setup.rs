@@ -141,23 +141,37 @@ pub fn compare_installed(version_output: Option<&str>, setup: &str) -> Installed
     }
 }
 
-/// Sessions of one tool linked to Clearway: those running the plugin of this version, and older ones to restart.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SessionCount {
+/// Sessions of one tool linked to Clearway: those running this version, and the others to restart.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sessions {
     pub current: usize,
-    pub old: usize,
+    /// Name and version of each session still on another version.
+    pub old: Vec<(String, String)>,
 }
 
-/// Counts the sessions of `tool` (`claude`, `codex`) among the links of `/status`, a session once whatever its number
-/// of links; the client is `<tool> mcp <version>`.
-pub fn count_sessions(links: &[crate::model::LinkView], tool: &str, version: &str) -> SessionCount {
-    let mut sessions: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
+/// Sessions of `tool` (`claude`, `codex`) among the links of `/status`, each once whatever its number of links; the
+/// client is `<tool> mcp <version>`.
+pub fn sessions_of(links: &[crate::model::LinkView], tool: &str, version: &str) -> Sessions {
+    let mut sessions: std::collections::BTreeMap<&str, Option<&str>> = std::collections::BTreeMap::new();
     for l in links.iter().filter(|l| l.client.split_whitespace().next() == Some(tool)) {
-        let current = l.client.split_whitespace().last() == Some(version);
-        *sessions.entry(l.session.as_str()).or_default() |= current;
+        let v = l.client.split_whitespace().last().unwrap_or("?");
+        let entry = sessions.entry(l.session.as_str()).or_insert(Some(v));
+        if v == version {
+            *entry = None;
+        }
     }
-    let current = sessions.values().filter(|c| **c).count();
-    SessionCount { current, old: sessions.len() - current }
+    let old: Vec<(String, String)> =
+        sessions.iter().filter_map(|(s, v)| v.map(|v| ((*s).to_owned(), v.to_owned()))).collect();
+    Sessions { current: sessions.len() - old.len(), old }
+}
+
+/// `Claude 471fcb8c (0.1.2), Claude 0fbafc39 (0.1.1), +2`: at most `max` names, then how many more.
+pub fn old_sessions_list(old: &[(String, String)], max: usize) -> String {
+    let mut parts: Vec<String> = old.iter().take(max).map(|(s, v)| format!("{s} ({v})")).collect();
+    if old.len() > max {
+        parts.push(format!("+{}", old.len() - max));
+    }
+    parts.join(", ")
 }
 
 /// Trust of Clearway's hook in Codex: a hook must be approved in `/hooks` before Codex runs it.

@@ -9,8 +9,8 @@ use clearway::config::Config;
 use clearway::model::Status;
 use clearway::protocol::{DEFAULT_PIPE, Request, Response, read_line_limited};
 use clearway::setup::{
-    HookTrust, Installed, Probe, SessionCount, WSL_PROBE, compare_installed, count_sessions, codex_hooks_request, expand, find_files,
-    hook_trust_from_config, hook_trust_from_list, probe_result, sh_quote, wsl_names,
+    HookTrust, Installed, Probe, Sessions, WSL_PROBE, compare_installed, codex_hooks_request, expand, find_files,
+    hook_trust_from_config, hook_trust_from_list, old_sessions_list, probe_result, sessions_of, sh_quote, wsl_names,
 };
 use clearway::tr;
 use serde_json::Value;
@@ -176,7 +176,7 @@ pub struct Outcome {
 /// What the "Verify" button found.
 pub struct Checks {
     /// Sessions linked to Clearway right now (Claude Code, Codex); `None` when Clearway does not answer.
-    pub sessions: Option<(SessionCount, SessionCount)>,
+    pub sessions: Option<(Sessions, Sessions)>,
     /// Trust of the hook in each place where the Codex plugin is installed.
     pub trust: Vec<(String, HookTrust)>,
 }
@@ -865,7 +865,7 @@ fn codex_trust(distro: Option<&str>, path: &str) -> HookTrust {
 /// Checks behind the "Verify" button, for the plugins installed by `actions`.
 pub fn check(actions: &[Action]) -> Checks {
     let version = env!("CARGO_PKG_VERSION");
-    let sessions = server_status().map(|s| (count_sessions(&s.links, "claude", version), count_sessions(&s.links, "codex", version)));
+    let sessions = server_status().map(|s| (sessions_of(&s.links, "claude", version), sessions_of(&s.links, "codex", version)));
     let trust = actions
         .iter()
         .filter_map(|a| match a {
@@ -912,17 +912,15 @@ fn text_mode(uninstall: bool, yes: bool, purge: bool, verify: bool) -> i32 {
     if verify {
         let c = check(&actions);
         match c.sessions {
-            Some((claude, codex)) => println!(
-                "\n{}",
-                tr!(
-                    "Linked sessions: Claude Code {} (+{} old), Codex {} (+{} old)",
-                    "Sessions liées : Claude Code {} (+{} anciennes), Codex {} (+{} anciennes)",
-                    claude.current,
-                    claude.old,
-                    codex.current,
-                    codex.old
-                )
-            ),
+            Some((claude, codex)) => {
+                println!();
+                for (tool, s) in [("Claude Code", claude), ("Codex", codex)] {
+                    println!("{}", tr!("{tool} sessions up to date: {}", "Sessions {tool} à jour : {}", s.current));
+                    if !s.old.is_empty() {
+                        println!("{}", tr!("  to restart (older version): {}", "  à relancer (ancienne version) : {}", old_sessions_list(&s.old, usize::MAX)));
+                    }
+                }
+            }
             None => println!("\n{}", tr!("Clearway does not answer.", "Clearway ne répond pas.")),
         }
         for (place, t) in c.trust {
