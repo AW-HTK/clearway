@@ -11,12 +11,10 @@ version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 plugin_version() { sed -n 's/.*"version": "\([^"]*\)".*/\1/p' | head -1; }
 claude=$(plugin_version < plugins/clearway/.claude-plugin/plugin.json)
 codex=$(plugin_version < plugins/clearway/.codex-plugin/plugin.json)
-[ "$claude" = "$codex" ] || { echo "plugin versions differ: Claude $claude, Codex $codex" >&2; exit 1; }
-# Claude Code only sees a new plugin when its version changes.
-last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
-if [ -n "$last" ] && ! git diff --quiet "$last" -- plugins .claude-plugin; then
-    before=$(git show "$last:plugins/clearway/.claude-plugin/plugin.json" | plugin_version)
-    [ "$before" != "$claude" ] || { echo "plugins/ changed since $last: raise the plugin version ($claude)" >&2; exit 1; }
+# One version for the whole product: Claude Code only sees a new plugin when its version changes.
+if [ "$claude" != "$version" ] || [ "$codex" != "$version" ]; then
+    echo "versions differ: Cargo.toml $version, Claude plugin $claude, Codex plugin $codex" >&2
+    exit 1
 fi
 [ -n "${CLEARWAY_RELEASE_SIGNING_KEY:-}" ] || { echo "CLEARWAY_RELEASE_SIGNING_KEY missing" >&2; exit 1; }
 

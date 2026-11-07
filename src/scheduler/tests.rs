@@ -272,17 +272,18 @@ fn immediate_refusal_of_impossible_needs() {
 
 #[test]
 fn wsl_ram_also_debits_windows_ram() {
-    // Windows: 9 GB available − 4 GB margin = 5 GB; an active 4 GB WSL ticket reserves 4.
+    // Windows: 9 GB available − 4 GB margin = 5 GB; an active 4 GB WSL ticket reserves 4, minus the 0.3 GB vmmemWSL
+    // holds unused (4 GB held, 3.7 GB used in WSL).
     let m = measures(9.0, 8.0, 4.0);
     let e = state(vec![active(ticket(1, Side::Wsl, 4.0, 2, 30), H - 60, 8.0), ticket(2, Side::Windows, 3.0, 2, 10)]);
     let p = schedule(&e, &m, &config(), H);
     assert!(p.events.is_empty());
     let r = &p.reasons[&2];
     assert_eq!(r.reserve.as_deref(), Some("ram_windows"));
-    assert_eq!(r.reserved_by_active, Some(4096));
+    assert_eq!(r.reserved_by_active, Some(4096 - 328));
 
     let lev = levels(&p.state, &m, &config(), H);
-    assert_eq!(lev[Reserve::RamWindows.i()].reserve, 4096);
+    assert_eq!(lev[Reserve::RamWindows.i()].reserve, 4096 - 328);
     assert_eq!(lev[Reserve::RamWsl.i()].reserve, 4096);
     // A Windows task does not debit WSL RAM.
     let e = state(vec![active(ticket(1, Side::Windows, 4.0, 2, 30), H - 60, 8.0)]);
@@ -602,13 +603,16 @@ fn real_case_11_05_wsl_ticket_of_3_gb() {
     let e = state(vec![ticket(1, Side::Wsl, 3.0, 2, 5)]);
     let p = schedule(&e, &m, &c, H);
     assert_eq!(p.events, vec![Event::Cleared(1)], "{}", p.reasons[&1].message);
-    // The VM can only grow by 1.2 GB more: that is all the ticket reserves on Windows RAM.
+    // vmmemWSL holds 10.8 GB while WSL uses 5.8: the 3 GB come out of the 5 GB it holds unused, Windows gives nothing.
     let lev = levels(&p.state, &m, &c, H);
-    assert_eq!(lev[Reserve::RamWindows.i()].reserve, 1229);
+    assert_eq!(lev[Reserve::RamWindows.i()].reserve, 0);
     assert_eq!(lev[Reserve::RamWsl.i()].reserve, 3072);
-    // A Windows ticket of the same size debits its whole need: 4.7 − 1.2 − 1.5 = 2 GB free, it waits.
+    // A Windows ticket of the same size debits its whole need: 4.7 − 1.5 = 3.2 GB free, it goes.
     let e = state(vec![active(ticket(1, Side::Wsl, 3.0, 2, 5), H, 6.0), ticket(2, Side::Windows, 3.0, 2, 5)]);
     let p = schedule(&e, &m, &c, H);
+    assert_eq!(p.events, vec![Event::Cleared(2)], "{}", p.reasons[&2].message);
+    // Without a fresh WSL measure nothing is known to be reusable: the VM's 1.2 GB growth is reserved, #2 waits.
+    let p = schedule(&e, &m, &c, H + WSL_FRESHNESS_S + 1);
     assert!(p.events.is_empty());
     assert_eq!(p.reasons[&2].reserve.as_deref(), Some("ram_windows"));
 }
@@ -624,6 +628,38 @@ fn windows_debit_of_a_wsl_ticket() {
     let mut halted = measures(20.0, 8.0, 4.0);
     halted.vmmem = None;
     assert_eq!(debit(Reserve::RamWindows, Side::Wsl, &b, &halted, &c), 3072);
+}
+
+#[test]
+fn a_wsl_ticket_first_uses_the_memory_vmmem_already_holds() {
+    let c = Config::default();
+    // vmmemWSL holds 4.8 GB while WSL uses 1.7 GB: 3.1 GB come back to a WSL task without the VM growing.
+    let m = fresh(measures(3.0, 10.0, 4.8), H);
+    assert_eq!(wsl_reusable(&m, H), 4915 - (11_960 - 10_240));
+    let p = schedule(&state(vec![ticket(1, Side::Wsl, 3.0, 2, 5)]), &m, &c, H);
+    assert_eq!(p.events, vec![Event::Cleared(1)], "{}", p.reasons[&1].message);
+    // Without a fresh WSL measure, nothing is known to be reusable: 3 GB > 3 − 1.5 GB free on Windows.
+    let late = H + WSL_FRESHNESS_S + 1;
+    let p = schedule(&state(vec![ticket(1, Side::Wsl, 3.0, 2, 5)]), &m, &c, late);
+    assert!(p.events.is_empty());
+    assert_eq!(p.reasons[&1].reserve.as_deref(), Some("ram_windows"));
+}
+
+#[test]
+fn the_reusable_memory_is_shared_between_wsl_tickets() {
+    let c = Config::default();
+    let m = fresh(measures(3.0, 10.0, 4.8), H);
+    let e = state(vec![ticket(1, Side::Wsl, 3.0, 2, 5), ticket(2, Side::Wsl, 3.0, 2, 5)]);
+    let p = schedule(&e, &m, &c, H);
+    assert_eq!(p.events, vec![Event::Cleared(1)], "{}", p.reasons[&1].message);
+    assert_eq!(p.reasons[&2].reserve.as_deref(), Some("ram_windows"), "{}", p.reasons[&2].message);
+    // Next pass: #1 still takes its 3 GB from the 3.1 GB reusable; #2 would add 2.9 GB of VM growth.
+    let lev = levels(&p.state, &m, &c, H);
+    let windows = &lev[Reserve::RamWindows.i()];
+    assert_eq!((windows.reserve, windows.wsl.pending, windows.wsl.pool), (0, 3072, 3195));
+    assert_eq!(windows.wsl.cost(3072 + 3072), 3072 + 3072 - 3195);
+    let p = schedule(&p.state, &m, &c, H);
+    assert_eq!(state_of(&p.state, 2), Some(TicketState::Waiting));
 }
 
 #[test]

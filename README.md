@@ -40,8 +40,8 @@ server answering after the switch is the new version, and otherwise puts the pre
 
 `scripts/build-release.sh` builds every release file into `dist/` (needs cargo-zigbuild, the targets
 `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-musl`, and the signing seed in `CLEARWAY_RELEASE_SIGNING_KEY`;
-`examples/sign_release.rs` holds the maintainer's commands). It refuses a release whose plugin changed without a new
-plugin version. For development:
+`examples/sign_release.rs` holds the maintainer's commands). It refuses a release whose plugin manifests do not carry
+the version of `Cargo.toml`. For development:
 
 ```sh
 export PATH=$HOME/.cargo/bin:$(echo ~/.local/share/uv/tools/cargo-zigbuild/lib/python*/site-packages/ziglang):$PATH
