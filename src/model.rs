@@ -436,4 +436,14 @@ pub struct Status {
     pub alerts: Vec<String>,
     #[serde(default)]
     pub manual_freeze: Option<u64>,
+    /// Open MCP links, i.e. the sessions currently connected (checked by the installer).
+    #[serde(default)]
+    pub links: Vec<LinkView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkView {
+    pub session: String,
+    /// `claude mcp x.y.z` or `codex mcp x.y.z`.
+    pub client: String,
 }

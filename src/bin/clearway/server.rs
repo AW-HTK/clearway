@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,7 +9,7 @@ use clearway::config::Config;
 use clearway::format::{duration, gb};
 use clearway::model::{
     Heartbeat, Need, OrphanCause, TicketRequest, Link, State, TicketState, Release, Measures, WslMeasures, Presence, Extension, Reason, Status,
-    Ticket, DecisionKind, View, TicketView,
+    Ticket, DecisionKind, View, TicketView, LinkView,
 };
 use clearway::scheduler::{self, Event, FreeReason, Reserve};
 use clearway::protocol::{Response, Request, read_line_limited};
@@ -28,6 +28,7 @@ const MAX_IN_FLIGHT_PER_CONNECTION: usize = 32;
 struct LiveLink {
     identity: String,
     session: String,
+    client: String,
 }
 
 /// Balloon rule: at most one per kind every 30 min; a pressure gives one only after 2 continuous min, and only if a
@@ -73,7 +74,9 @@ pub struct Server {
     freeze_texts: Vec<String>,
     pressure: Vec<Reserve>,
     finished: VecDeque<(u64, &'static str, String)>,
-    head_key: String,
+    /// Head of the queue and the blocking reserves already logged for it: a reason alternating between two reserves
+    /// is logged once per reserve.
+    head_logged: (u64, BTreeSet<String>),
     announcements: Vec<Announcement>,
     balloons: Balloons,
     swap_history: VecDeque<(u64, u64)>,
@@ -271,7 +274,7 @@ impl Server {
             freeze_texts: Vec::new(),
             pressure: Vec::new(),
             finished: VecDeque::new(),
-            head_key: String::new(),
+            head_logged: (0, BTreeSet::new()),
             announcements,
             balloons: Balloons::default(),
             swap_history: VecDeque::new(),
@@ -472,13 +475,20 @@ impl Server {
             .tickets
             .iter()
             .find(|t| t.state == TicketState::Waiting)
-            .and_then(|t| self.reasons.get(&t.id));
-        let key = head.map(|r| r.key()).unwrap_or_default();
-        if key != self.head_key {
-            if let Some(r) = head {
-                self.log(&format!("WAITING {}", r.message));
+            .and_then(|t| self.reasons.get(&t.id).map(|r| (t.id, r)));
+        match head {
+            Some((id, r)) => {
+                if self.head_logged.0 != id {
+                    self.head_logged = (id, BTreeSet::new());
+                }
+                let reserve = r.reserve.clone().unwrap_or_default();
+                if !self.head_logged.1.contains(&reserve) {
+                    let message = r.message.clone();
+                    self.head_logged.1.insert(reserve);
+                    self.log(&format!("WAITING {message}"));
+                }
             }
-            self.head_key = key;
+            None => self.head_logged = (0, BTreeSet::new()),
         }
         Ok(())
     }
@@ -545,6 +555,7 @@ impl Server {
                 .collect(),
             alerts,
             manual_freeze: self.state.manual_freeze,
+            links: self.links.values().map(|l| LinkView { session: l.session.clone(), client: l.client.clone() }).collect(),
         }
     }
 
@@ -1183,7 +1194,7 @@ fn open_link(p: &Shared, req: &Request, ctx: &Context) -> Response {
     s.update_wsl(l.measures, now);
     s.link_counter += 1;
     let id = s.link_counter;
-    s.links.insert(id, LiveLink { identity: l.identity.clone(), session: l.session.clone() });
+    s.links.insert(id, LiveLink { identity: l.identity.clone(), session: l.session.clone(), client: l.client.clone() });
     let mut candidate = s.state.clone();
     let mut resumed = Vec::new();
     for t in candidate.tickets.iter_mut().filter(|t| t.lost.is_some() && t.identity.as_deref() == Some(l.identity.as_str())) {

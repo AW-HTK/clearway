@@ -59,11 +59,46 @@ fn heavy_commands_are_found_behind_wrappers_and_chains() {
 }
 
 #[test]
+fn the_script_of_a_shell_wrapper_is_judged() {
+    let cases = [
+        ("/usr/bin/zsh -lc 'make --version'", Some("make")),
+        ("bash -c \"cd x && cargo build --release\"", Some("cargo build")),
+        ("sh -o pipefail -ec 'npm test | tee log'", Some("npm test")),
+        ("env FOO=1 bash --login -c 'pytest -x'", Some("pytest")),
+        ("zsh -lc \"bash -c 'cargo t'\"", Some("cargo t")),
+        ("pwsh -NoProfile -Command \"cargo build; echo ok\"", Some("cargo build")),
+        ("powershell.exe -c dotnet test", Some("dotnet test")),
+        ("cmd.exe /C \"msbuild app.sln\"", Some("msbuild")),
+        ("bash script.sh", None),
+        ("bash -c 'cargo fmt && git status'", None),
+        ("git commit -m 'fix && cargo build'", None),
+        ("echo \"make it; cargo build\"", None),
+        ("pwsh -File build.ps1", None),
+    ];
+    for (command, expected) in cases {
+        assert_eq!(heavy(command).as_deref(), expected, "{command}");
+    }
+}
+
+#[test]
+fn a_here_document_is_data_not_commands() {
+    let script = "python3 - <<'EOF'\nimport os\nmake = 1\ncargo build\nEOF\ngit status";
+    assert_eq!(heavy(script), None);
+    let unquoted = "cat > notes.txt <<-END\n\tcargo test\n\tEND\ncargo test";
+    assert_eq!(heavy(unquoted).as_deref(), Some("cargo test"), "the command after the document still counts");
+    assert_eq!(heavy("cat <<EOF | sh\nls\nEOF").as_deref(), None);
+}
+
+#[test]
 fn only_shell_tools_are_judged() {
     let bash = json!({"session_id": "abc", "tool_name": "Bash", "tool_input": {"command": "cargo build"}});
     assert_eq!(shell_command(&bash), Some(("abc".into(), "cargo build".into())));
     let codex = json!({"session_id": "t1", "tool_name": "exec_command", "tool_input": {"command": ["cargo", "test"]}});
     assert_eq!(shell_command(&codex), Some(("t1".into(), "cargo test".into())));
+    let wrapped = json!({"session_id": "t2", "tool_name": "exec_command", "tool_input": {"command": ["/usr/bin/zsh", "-lc", "cargo build"]}});
+    let (_, command) = shell_command(&wrapped).expect("shell tool");
+    assert_eq!(command, "/usr/bin/zsh -lc 'cargo build'");
+    assert_eq!(heavy(&command).as_deref(), Some("cargo build"));
     let mcp = json!({"session_id": "abc", "tool_name": "mcp__plugin_clearway_clearway__release", "tool_input": {}});
     assert_eq!(shell_command(&mcp), None);
 }

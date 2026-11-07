@@ -110,6 +110,9 @@ fn heavy_words(words: &[&str], depth: u8) -> Option<String> {
     if p == "clearway" || p == "charge" {
         return None;
     }
+    if let Some(script) = inner_script(&p, rest) {
+        return if depth < 3 { heavy_at(&script, depth + 1) } else { None };
+    }
     if ALWAYS.contains(&p.as_str()) {
         return Some(label(None));
     }
@@ -151,13 +154,143 @@ fn heavy_words(words: &[&str], depth: u8) -> Option<String> {
     None
 }
 
+/// Simple commands of a shell line (split on `&&`, `|`, `;`…) as unquoted words; quotes protect separators.
+fn simple_commands(line: &str) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut documents: Vec<(String, bool)> = Vec::new();
+    let mut chars = line.chars().peekable();
+    let end_word = |words: &mut Vec<String>, word: &mut String, started: &mut bool| {
+        if *started {
+            words.push(std::mem::take(word));
+            *started = false;
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                started = true;
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    word.push(q);
+                }
+            }
+            '"' => {
+                started = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' if chars.peek().is_some_and(|n| matches!(n, '"' | '\\' | '$' | '`')) => {
+                            word.extend(chars.next());
+                        }
+                        _ => word.push(q),
+                    }
+                }
+            }
+            '\\' if chars.peek().is_some_and(|n| n.is_whitespace() || matches!(n, '\'' | '"' | '\\')) => {
+                started = true;
+                word.extend(chars.next());
+            }
+            '$' if chars.peek() == Some(&'(') => {}
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                if chars.peek() == Some(&'<') {
+                    chars.next();
+                    continue;
+                }
+                let tabs = chars.next_if_eq(&'-').is_some();
+                while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+                let mut delimiter = String::new();
+                while let Some(c) = chars.next_if(|c| !c.is_whitespace() && !";|&<>()".contains(*c)) {
+                    if !matches!(c, '\'' | '"' | '\\') {
+                        delimiter.push(c);
+                    }
+                }
+                if !delimiter.is_empty() {
+                    documents.push((delimiter, tabs));
+                }
+            }
+            '\n' if !documents.is_empty() => {
+                end_word(&mut words, &mut word, &mut started);
+                if !words.is_empty() {
+                    commands.push(std::mem::take(&mut words));
+                }
+                for (delimiter, tabs) in documents.drain(..) {
+                    loop {
+                        let line: String = chars.by_ref().take_while(|c| *c != '\n').collect();
+                        let line = if tabs { line.trim_start_matches('\t') } else { line.as_str() };
+                        if line == delimiter || chars.peek().is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+            '\n' | ';' | '|' | '&' | '(' | ')' | '{' | '}' | '`' => {
+                end_word(&mut words, &mut word, &mut started);
+                if !words.is_empty() {
+                    commands.push(std::mem::take(&mut words));
+                }
+            }
+            c if c.is_whitespace() => end_word(&mut words, &mut word, &mut started),
+            c => {
+                started = true;
+                word.push(c);
+            }
+        }
+    }
+    end_word(&mut words, &mut word, &mut started);
+    if !words.is_empty() {
+        commands.push(words);
+    }
+    commands
+}
+
+/// The script run by `sh -c '…'`, `pwsh -Command …` or `cmd /c …`, when `p` is such a shell.
+fn inner_script(p: &str, rest: &[&str]) -> Option<String> {
+    match p {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "fish" => {
+            let mut i = 0;
+            while let Some(w) = rest.get(i) {
+                if !(w.starts_with('-') || w.starts_with('+')) || *w == "-" || *w == "--" {
+                    return None;
+                }
+                if !w.starts_with("--") && w.contains('c') {
+                    return rest.get(i + 1).map(|s| (*s).to_owned());
+                }
+                i += if matches!(*w, "-o" | "+o" | "-O" | "+O") { 2 } else { 1 };
+            }
+            None
+        }
+        "pwsh" | "powershell" => {
+            let k = rest.iter().position(|w| {
+                let w = w.to_lowercase();
+                let flag = w.trim_start_matches(['-', '/']);
+                w.len() > flag.len() && !flag.is_empty() && "command".starts_with(flag)
+            })?;
+            Some(rest[k + 1..].join(" ")).filter(|s| !s.is_empty())
+        }
+        "cmd" => {
+            let k = rest.iter().position(|w| w.eq_ignore_ascii_case("/c") || w.eq_ignore_ascii_case("/k"))?;
+            Some(rest[k + 1..].join(" ")).filter(|s| !s.is_empty())
+        }
+        _ => None,
+    }
+}
+
+fn heavy_at(line: &str, depth: u8) -> Option<String> {
+    simple_commands(line).iter().find_map(|words| {
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        heavy_words(&words, depth)
+    })
+}
+
 /// The first heavy command of a shell line, e.g. `Some("cargo build")`.
 pub fn heavy(command: &str) -> Option<String> {
-    let spaced = command.replace("&&", "\n").replace("||", "\n");
-    spaced
-        .split(['\n', ';', '|', '&', '(', ')', '{', '}', '`'])
-        .map(|part| part.split_whitespace().map(|w| w.trim_start_matches("$(")).filter(|w| !w.is_empty()).collect::<Vec<_>>())
-        .find_map(|words| heavy_words(&words, 0))
+    heavy_at(command, 0)
 }
 
 /// `(session_id, command)` of a PreToolUse event whose tool runs a shell command.
@@ -168,10 +301,19 @@ pub fn shell_command(input: &Value) -> Option<(String, String)> {
     }
     let command = match &input["tool_input"]["command"] {
         Value::String(s) => s.clone(),
-        Value::Array(a) => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "),
+        Value::Array(a) => a.iter().filter_map(Value::as_str).map(quote).collect::<Vec<_>>().join(" "),
         _ => return None,
     };
     Some((input["session_id"].as_str().unwrap_or_default().to_owned(), command))
+}
+
+fn quote(word: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./:=+,@%".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
 }
 
 fn owned_by(t: &TicketView, session_id: &str) -> bool {

@@ -1,6 +1,7 @@
 //! User-facing messages: English by default, French provided.
-//! The language comes from `language` in config.toml (server), else from `CLEARWAY_LANG`, `LC_ALL`, `LC_MESSAGES`
-//! or `LANG`, else from the Windows display language.
+//! The language comes from `language` in config.toml (server), else from `CLEARWAY_LANG`, then in WSL from the
+//! Windows language saved by the installer, then from `LC_ALL`, `LC_MESSAGES` or `LANG`, else from the Windows display
+//! language.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -73,7 +74,13 @@ pub fn name(lang: Lang) -> &'static str {
 }
 
 pub fn detect() -> Lang {
-    for var in ["CLEARWAY_LANG", "LC_ALL", "LC_MESSAGES", "LANG"] {
+    if let Some(l) = std::env::var("CLEARWAY_LANG").ok().as_deref().and_then(parse) {
+        return l;
+    }
+    if let Some(l) = saved_lang() {
+        return l;
+    }
+    for var in ["LC_ALL", "LC_MESSAGES", "LANG"] {
         if let Some(v) = std::env::var(var).ok().filter(|v| !v.is_empty()) {
             // The first variable set wins, as for gettext: `LANG=C.UTF-8` means English.
             return parse(&v).unwrap_or(Lang::En);
@@ -94,6 +101,26 @@ fn system_lang() -> Option<Lang> {
 
 #[cfg(not(windows))]
 fn system_lang() -> Option<Lang> {
+    None
+}
+
+/// File where install.sh saves the Windows language, so that a WSL client speaks like the server.
+#[cfg(not(windows))]
+pub fn saved_lang_file() -> Option<std::path::PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".config")))?;
+    Some(config.join("clearway").join("language"))
+}
+
+#[cfg(not(windows))]
+fn saved_lang() -> Option<Lang> {
+    parse(std::fs::read_to_string(saved_lang_file()?).ok()?.trim())
+}
+
+#[cfg(windows)]
+fn saved_lang() -> Option<Lang> {
     None
 }
 

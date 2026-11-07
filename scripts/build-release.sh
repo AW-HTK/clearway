@@ -26,9 +26,9 @@ cargo build --release -j 4 --example sign_release
 mkdir -p dist
 cp target/x86_64-pc-windows-gnu/release/clearway.exe dist/clearway.exe
 cp target/x86_64-unknown-linux-musl/release/clearway dist/clearway-x86_64-linux
-cp windows/install.ps1 install.sh dist/
+cp windows/install.ps1 windows/uninstall.ps1 install.sh dist/
 printf '%s\n' "$version" > dist/VERSION
-(cd dist && sha256sum clearway.exe clearway-x86_64-linux install.ps1 install.sh VERSION > SHA256SUMS)
+(cd dist && sha256sum clearway.exe clearway-x86_64-linux install.ps1 uninstall.ps1 install.sh VERSION > SHA256SUMS)
 cargo zigbuild --release -j 4 --target x86_64-pc-windows-gnu --features setup --bin clearway-setup
 cp target/x86_64-pc-windows-gnu/release/clearway-setup.exe dist/
 (cd dist && sha256sum clearway-setup.exe >> SHA256SUMS)

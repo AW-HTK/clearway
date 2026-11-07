@@ -42,8 +42,16 @@ mkdir -p "$bin"
 install -m 755 "$tmp/$asset" "$bin/.clearway.new"
 mv -f "$bin/.clearway.new" "$bin/clearway"
 say "clearway installed in $bin." "clearway installé dans $bin."
+# The setup passes the Windows language: the client then speaks like the server, whatever LANG says.
+case ${CLEARWAY_LANG:-} in
+    en | fr)
+        conf=${XDG_CONFIG_HOME:-$HOME/.config}/clearway
+        mkdir -p "$conf" && printf '%s\n' "$CLEARWAY_LANG" > "$conf/language" ;;
+esac
 
-case :$PATH: in
+# Started by the setup, this script gets a bare PATH: what counts is the PATH of a login shell.
+login_path=$("${SHELL:-sh}" -lc 'printf %s "$PATH"' 2>/dev/null || true)
+case :$PATH:$login_path: in
     *:"$bin":*) ;;
     *) say "Add $bin to your PATH (for example in ~/.profile), then open a new terminal." \
            "Ajoutez $bin à votre PATH (par exemple dans ~/.profile), puis ouvrez un nouveau terminal." ;;
