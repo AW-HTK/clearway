@@ -491,7 +491,8 @@ fn manual_freeze() {
 #[test]
 fn silent_active_becomes_orphan_and_freezes_admissions() {
     let e = state(vec![active(ticket(1, Side::Wsl, 1.0, 1, 30), H, 8.0), ticket(2, Side::Wsl, 1.0, 1, 5)]);
-    let p = schedule(&e, &large(), &config(), H + 61);
+    let silent = H + config().silence_delay_s + 1;
+    let p = schedule(&e, &large(), &config(), silent);
     assert_eq!(p.events, vec![Event::Orphaned(1)]);
     assert_eq!(state_of(&p.state, 1), Some(TicketState::Orphaned));
     let r2 = &p.reasons[&2];
@@ -503,7 +504,7 @@ fn silent_active_becomes_orphan_and_freezes_admissions() {
     assert!(!p.freeze_texts.is_empty());
 
     // The orphan's reservation still counts.
-    let lev = levels(&p.state, &large(), &config(), H + 61);
+    let lev = levels(&p.state, &large(), &config(), silent);
     assert_eq!(lev[Reserve::RamWsl.i()].reserve, 1024);
 }
 
@@ -844,11 +845,11 @@ fn reservation_limited_to_rampup() {
     let e = present(state(vec![t42.clone(), ticket(43, Side::Windows, 4.0, 4, 10)]), H);
     let p = schedule(&e, &m, &c, H);
     assert_eq!(p.events, vec![Event::Cleared(43)], "{}", p.reasons[&43].message);
-    assert_eq!(reservation(&t42, Reserve::RamWindows, &m, &c, H), 0);
-    assert_eq!(reservation(&t42, Reserve::RamWsl, &m, &c, H), 0);
-    assert_eq!(reservation(&t42, Reserve::Cpu, &m, &c, H), 10, "CPU is not measured: whole reservation");
+    assert_eq!(reservation(&State::default(), &t42, Reserve::RamWindows, &m, &c, H), 0);
+    assert_eq!(reservation(&State::default(), &t42, Reserve::RamWsl, &m, &c, H), 0);
+    assert_eq!(reservation(&State::default(), &t42, Reserve::Cpu, &m, &c, H), 1, "measured load 1.0: one core left reserved");
     assert!(
-        p.reasons[&42].message.contains("Montée en charge terminée, réservé encore : RAM Windows 0 Go, RAM WSL 0 Go"),
+        p.reasons[&42].message.contains("Montée en charge terminée, réservé encore : RAM Windows 0 Go, CPU Windows 1 cœur, RAM WSL 0 Go, CPU WSL 1 cœur"),
         "{}",
         p.reasons[&42].message
     );
@@ -864,7 +865,7 @@ fn reservation_limited_to_rampup() {
 
     // Partial ramp-up: 1.5 GB taken out of 4 GB declared → 2.5 GB still reserved on WSL.
     let m2 = fresh(measures(9.0, 5.5, 8.5), H);
-    assert_eq!(reservation(&t42, Reserve::RamWsl, &m2, &c, H), 2560);
+    assert_eq!(reservation(&State::default(), &t42, Reserve::RamWsl, &m2, &c, H), 2560);
 
     // Ticket granted by an older exe (no baselines): fall back on the available RAM recorded at grant time.
     let mut old = t42.clone();
@@ -872,13 +873,13 @@ fn reservation_limited_to_rampup() {
     old.base_ram_wsl_mb = None;
     old.base_ram_windows_mb = None;
     old.avail_at_grant_mb = Some(7 * 1024);
-    assert_eq!(reservation(&old, Reserve::RamWsl, &m, &c, H), 0);
-    assert_eq!(reservation(&old, Reserve::RamWindows, &m, &c, H), 0);
+    assert_eq!(reservation(&State::default(), &old, Reserve::RamWsl, &m, &c, H), 0);
+    assert_eq!(reservation(&State::default(), &old, Reserve::RamWindows, &m, &c, H), 0);
 
     // An orphan keeps its whole reservation.
     let mut orphan = t42.clone();
     orphan.state = TicketState::Orphaned;
-    assert_eq!(reservation(&orphan, Reserve::RamWsl, &m, &c, H), 4096);
+    assert_eq!(reservation(&State::default(), &orphan, Reserve::RamWsl, &m, &c, H), 4096);
 }
 
 #[test]
@@ -953,4 +954,104 @@ fn reasons_in_english() {
     assert!(message.starts_with("#3 waiting, position 1: WSL RAM insufficient (need "), "{message}");
     assert!(message.contains("Unblocked when"), "{message}");
     assert!(p.reasons[&1].message.starts_with("#1: cleared. Free at clearance: "), "{}", p.reasons[&1].message);
+}
+
+#[test]
+fn presence_relay_late_by_100_s_is_not_an_orphan() {
+    let c = config();
+    assert_eq!(c.silence_delay_s, 150);
+    let t = active(ticket(1, Side::Windows, 1.0, 1, 30), H, 8.0);
+    let p = schedule(&state(vec![t]), &large(), &c, H + 100);
+    assert_eq!(state_of(&p.state, 1), Some(TicketState::Active), "a presence 100 s late is no orphan");
+    let p = schedule(&p.state, &large(), &c, H + 151);
+    assert_eq!(p.events, vec![Event::Orphaned(1)]);
+}
+
+#[test]
+fn measured_cpu_pressure_freezes_only_that_side() {
+    let c = config();
+    let saturated = |load1: f32, at: u64| {
+        let mut m = fresh(large(), at);
+        if let Some(w) = &mut m.wsl {
+            w.load1 = load1;
+        }
+        m
+    };
+    // Load 11.2 on 10 cores: pressure declared after 60 s, not before.
+    let mut e = state(vec![]);
+    for k in 0..=6 {
+        let at = H + k * 10;
+        e = schedule(&e, &saturated(11.2, at), &c, at).state;
+    }
+    assert!(e.cpu_pressure.wsl.on);
+    let mut wsl = ticket(1, Side::Wsl, 1.0, 2, 10);
+    wsl.presence = H + 70;
+    let mut windows = ticket(2, Side::Windows, 1.0, 2, 10);
+    windows.presence = H + 70;
+    e.tickets = vec![wsl, windows];
+    let p = schedule(&e, &saturated(11.2, H + 70), &c, H + 70);
+    assert_eq!(p.events, vec![Event::Cleared(2)], "the Windows ticket does not take WSL cores");
+    let message = &p.reasons[&1].message;
+    assert!(message.contains("CPU WSL saturé (load 11,2 / 10 cœurs) depuis 1 min"), "{message}");
+    assert_eq!(reserve_views(&p.state, &saturated(11.2, H + 70), &c, H + 70)[3].used_pct, Some(112));
+
+    // Under 70 % for 60 s: lifted (hysteresis: 80 % keeps it on).
+    let mut e = p.state;
+    e.tickets.retain(|t| t.id == 1);
+    for k in 0..=6 {
+        let at = H + 80 + k * 10;
+        e.ticket_mut(1).unwrap().presence = at;
+        e = schedule(&e, &saturated(8.0, at), &c, at).state;
+    }
+    assert!(e.cpu_pressure.wsl.on, "80 % is above the release threshold");
+    let mut lifted = false;
+    for k in 0..=7 {
+        let at = H + 160 + k * 10;
+        e.ticket_mut(1).unwrap().presence = at;
+        let p = schedule(&e, &saturated(5.0, at), &c, at);
+        lifted |= p.events.contains(&Event::Cleared(1));
+        e = p.state;
+    }
+    assert!(lifted && !e.cpu_pressure.wsl.on);
+}
+
+#[test]
+fn settled_cpu_follows_the_measured_load() {
+    let c = config();
+    let mut m = fresh(large(), H);
+    m.wsl.as_mut().unwrap().load1 = 3.2;
+    m.cpu_pct = 50.0;
+    let t1 = active(ticket(1, Side::Wsl, 1.0, 6, 60), H - 600, 8.0);
+    let t2 = active(ticket(2, Side::Wsl, 1.0, 2, 60), H - 600, 8.0);
+    let young = active(ticket(3, Side::Wsl, 1.0, 2, 60), H - 60, 8.0);
+    let e = present(state(vec![t1.clone(), t2.clone(), young.clone()]), H);
+    // Load 3.2 shared 6:2 between the settled ones; the young one keeps its whole declaration.
+    assert_eq!(reservation(&e, &t1, Reserve::Cpu, &m, &c, H), 3);
+    assert_eq!(reservation(&e, &t2, Reserve::Cpu, &m, &c, H), 1);
+    assert_eq!(reservation(&e, &young, Reserve::Cpu, &m, &c, H), 2);
+    // Windows: 50 % of 16 cores = 8 busy, more than the 8 declared by the settled ones: capped at the declaration.
+    assert_eq!(reservation(&e, &t1, Reserve::CpuWindows, &m, &c, H), 6);
+    // Without a fresh WSL measure: whole declaration.
+    let stale = fresh(large(), H - 120);
+    assert_eq!(reservation(&e, &t1, Reserve::Cpu, &stale, &c, H), 6);
+    // Idle: the floor stays reserved.
+    let mut idle = m.clone();
+    idle.wsl.as_mut().unwrap().load1 = 0.0;
+    assert_eq!(reservation(&e, &t2, Reserve::Cpu, &idle, &c, H), CPU_FLOOR);
+}
+
+#[test]
+fn exclusive_goes_when_the_measured_load_allows() {
+    let c = config();
+    let mut m = fresh(large(), H);
+    m.wsl.as_mut().unwrap().load1 = 0.4;
+    // #1 settled and nearly idle: 1 core reserved, the 9-core exclusive #2 fits in 10.
+    let e = present(state(vec![active(ticket(1, Side::Wsl, 1.0, 4, 60), H - 600, 8.0), ticket(2, Side::Wsl, 1.0, 9, 30)]), H);
+    let p = schedule(&e, &m, &c, H);
+    assert_eq!(p.events, vec![Event::Cleared(2)], "{}", p.reasons[&2].message);
+    // Busy (load 3): still alone.
+    m.wsl.as_mut().unwrap().load1 = 3.0;
+    let p = schedule(&e, &m, &c, H);
+    assert!(p.events.is_empty());
+    assert_eq!(p.reasons[&2].reserve.as_deref(), Some("exclusive"));
 }

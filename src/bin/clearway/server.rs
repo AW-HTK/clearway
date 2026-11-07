@@ -558,18 +558,26 @@ impl Server {
             ui::Color::Green
         };
         let lev = scheduler::reserve_views(&self.state, &self.measures, &self.config, unix_now());
+        let by_key = |k: &str| lev.iter().find(|r| r.key == k).expect("every reserve has a view");
+        let (ram_windows, cpu_windows, ram_wsl, cpu_wsl) =
+            (by_key("ram_windows"), by_key("cpu_windows"), by_key("ram_wsl"), by_key("cpu"));
+        let wsl = match (self.measures.vmmem, ram_wsl.estimate) {
+            (None, _) => clearway::tr!("stopped", "arrêté"),
+            (Some(_), Some(_)) => clearway::tr!(
+                "≈ {} (estimated) · CPU {}",
+                "≈ {} (estimé) · CPU {}",
+                gb(ram_wsl.free.max(0)),
+                cpu_wsl.free.max(0)
+            ),
+            (Some(_), None) => format!("{} · CPU {}", ram_wsl.free_text(), cpu_wsl.free.max(0)),
+        };
         let mut text = clearway::tr!(
-            "Load: {actives} active, {waiting} waiting{}\nFree: Win {} · WSL {} · CPU {}/{}",
-            "Charge : {actives} actif(s), {waiting} en attente{}\nLibre : Win {} · WSL {} · CPU {}/{}",
+            "Load: {actives} active, {waiting} waiting{}\nFree: Win {} · CPU {} | WSL {}",
+            "Charge : {actives} actif(s), {waiting} en attente{}\nLibre : Win {} · CPU {} | WSL {}",
             if orphans > 0 { clearway::tr!(", {orphans} orphaned", ", {orphans} orphelin(s)") } else { String::new() },
-            lev[0].free_text(),
-            match (self.measures.vmmem, lev[1].estimate) {
-                (None, _) => clearway::tr!("stopped", "arrêté"),
-                (Some(_), Some(_)) => clearway::tr!("≈ {} (estimated)", "≈ {} (estimé)", gb(lev[1].free.max(0))),
-                (Some(_), None) => lev[1].free_text(),
-            },
-            lev[2].free.max(0),
-            lev[3].free.max(0)
+            ram_windows.free_text(),
+            cpu_windows.free.max(0),
+            wsl
         );
         let head = self
             .state

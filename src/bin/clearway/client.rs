@@ -1123,7 +1123,7 @@ fn status_view() -> Result<i32, String> {
                 q(r.reserve),
                 q(r.margin),
                 r.free_text()
-            )
+            ) + &r.used_pct.map_or(String::new(), |p| tr!(" · measured {p} %", " · mesuré {p} %"))
         );
     }
     // The manual freeze already has its own line above.
@@ -1291,7 +1291,9 @@ fn run_granted(c: &mut Client, id: u64, command: &[String]) -> Result<i32, Strin
     let done = Arc::new(AtomicBool::new(false));
     let watcher = {
         let done = done.clone();
-        let mut c = c.copy();
+        // The connection that just carried the acknowledgement is already open: the first presence leaves at once,
+        // without a new relay through WSL interop.
+        let mut c = std::mem::replace(c, c.copy());
         std::thread::spawn(move || {
             let path = format!("/tickets/{id}/presence");
             let mut warned = false;
@@ -1315,6 +1317,7 @@ fn run_granted(c: &mut Client, id: u64, command: &[String]) -> Result<i32, Strin
                     std::thread::sleep(Duration::from_millis(250));
                 }
             }
+            c
         })
     };
 
@@ -1340,7 +1343,9 @@ fn run_granted(c: &mut Client, id: u64, command: &[String]) -> Result<i32, Strin
         std::thread::sleep(Duration::from_millis(200));
     };
     done.store(true, Ordering::SeqCst);
-    let _ = watcher.join();
+    if let Ok(connection) = watcher.join() {
+        *c = connection;
+    }
 
     let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
@@ -1350,7 +1355,6 @@ fn run_granted(c: &mut Client, id: u64, command: &[String]) -> Result<i32, Strin
     let f = Release { code: Some(code), peak_mb, duration_s: Some(duration_s) };
     // A signal received must not prevent reporting the release.
     SIGNAL.store(0, Ordering::SeqCst);
-    let mut c = c.copy();
     match c.request("POST", &format!("/tickets/{id}/release"), serde_json::to_value(&f).map_err(|e| e.to_string())?) {
         Ok(r) if r.code == 200 || r.code == 404 => {}
         Ok(r) => eprintln!(

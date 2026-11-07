@@ -37,6 +37,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::server::{Closing, log_tail};
 use crate::ui::{self, shared};
 
+const GROUP_GAP: i32 = 10;
 const ID_LIST: usize = 100;
 const ID_CANCEL: usize = 101;
 const ID_FREE: usize = 102;
@@ -311,7 +312,7 @@ unsafe fn lay_out(h: HWND) {
             x += s(178);
         }
         y += s(28) + s(10);
-        let bars = RECT { left: m, top: y, right: m + width, bottom: y + s(22) + RESERVE_COUNT as i32 * s(26) };
+        let bars = RECT { left: m, top: y, right: m + width, bottom: y + s(22) + RESERVE_COUNT as i32 * s(26) + s(GROUP_GAP) };
         BARS.with(|b| b.set(bars));
         y = bars.bottom + s(8);
         MoveWindow(LOG.with(Cell::get), m, y, width, (rc.bottom - m - y).max(s(60)), 1);
@@ -536,7 +537,8 @@ unsafe fn draw_bars(hdc: HDC) {
         }
         let bar_width = ((zone.right - zone.left - s(115)) as f32 * 0.42) as i32;
         for (i, r) in status.reserves.iter().enumerate() {
-            let y = zone.top + s(22) + i as i32 * s(26);
+            // Windows reserves first, then WSL ones, a little apart.
+            let y = zone.top + s(22) + i as i32 * s(26) + if r.key.starts_with("ram_wsl") || r.key == "cpu" { s(GROUP_GAP) } else { 0 };
             text(hdc, &RECT { left: zone.left, top: y, right: zone.left + s(110), bottom: y + s(26) }, &r.name);
             let bar = RECT { left: zone.left + s(115), top: y + s(5), right: zone.left + s(115) + bar_width, bottom: y + s(21) };
             rectangle(hdc, &bar, FREE_COLOR);

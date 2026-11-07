@@ -4,19 +4,48 @@ use crate::config::Config;
 use crate::format::{cores, duration, gb, ram_option};
 use crate::i18n::Lang;
 use crate::model::{
-    Need, OrphanCause, Side, State, TicketState, Measures, WslMeasures, Reason, Ticket, DecisionKind, ReserveView,
+    DecisionKind, Hysteresis, Measures, Need, OrphanCause, Reason, ReserveView, Side, State, Ticket, TicketState, WslMeasures,
 };
 use crate::system::hhmm;
 use crate::tr;
 
 pub const WSL_FRESHNESS_S: u64 = 30;
 pub const SWAP_CALM_S: u64 = 60;
+/// Cores an active ticket keeps reserved however idle it is measured.
+pub const CPU_FLOOR: i64 = 1;
 
 /// Full but calm swap: worth reporting (status, tooltip) without freezing.
 pub fn calm_swap(e: &State, m: &Measures, c: &Config, now: u64) -> Option<String> {
     let w = fresh_wsl(m, now)?;
     (!e.swap_pressure && w.swap_pct() >= c.swap_threshold_pct)
         .then(|| tr!("WSL swap {}% full (calm)", "swap WSL plein à {} % (calme)", w.swap_pct()))
+}
+
+/// Measured use of a CPU reserve in percent of its budget; `None` without a fresh measure.
+pub fn cpu_used_pct(r: Reserve, m: &Measures, c: &Config, now: u64) -> Option<f64> {
+    match r {
+        Reserve::Cpu => fresh_wsl(m, now).map(|w| w.load1 as f64 * 100.0 / c.cpu_total.max(1) as f64),
+        Reserve::CpuWindows => (m.cpu_pct > 0.0 || m.windows_cores > 0).then_some(m.cpu_pct as f64),
+        _ => None,
+    }
+}
+
+/// Saturation must last `cpu.pressure_delay` to be declared, and calm must last as long to be lifted.
+fn update_cpu_pressure(e: &mut State, m: &Measures, c: &Config, now: u64) {
+    for (r, h) in [(Reserve::CpuWindows, &mut e.cpu_pressure.windows), (Reserve::Cpu, &mut e.cpu_pressure.wsl)] {
+        let Some(used) = cpu_used_pct(r, m, c, now) else {
+            *h = Hysteresis::default();
+            continue;
+        };
+        let crossing = if h.on { used < c.cpu_release_pct as f64 } else { used >= c.cpu_pressure_pct as f64 };
+        if !crossing {
+            h.since = None;
+        } else if now.saturating_sub(*h.since.get_or_insert(now)) >= c.cpu_pressure_delay_s {
+            h.on = !h.on;
+            h.declared_at = h.on.then(|| h.since.unwrap_or(now));
+            h.since = None;
+        }
+    }
 }
 
 /// A full swap alone says nothing (old pages): it must really be paging out, or memory must be short.
@@ -49,14 +78,15 @@ fn update_swap_pressure(e: &mut State, m: &Measures, c: &Config, now: u64) {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Grouped by side: Windows first, then WSL. The order is the display order everywhere.
 pub enum Reserve {
     RamWindows,
+    CpuWindows,
     RamWsl,
     Cpu,
-    CpuWindows,
 }
 
-pub const RESERVES: [Reserve; 4] = [Reserve::RamWindows, Reserve::RamWsl, Reserve::Cpu, Reserve::CpuWindows];
+pub const RESERVES: [Reserve; 4] = [Reserve::RamWindows, Reserve::CpuWindows, Reserve::RamWsl, Reserve::Cpu];
 pub const RESERVE_COUNT: usize = RESERVES.len();
 
 impl Reserve {
@@ -174,15 +204,37 @@ fn margin(r: Reserve, c: &Config) -> i64 {
     }
 }
 
+fn ramping_up(t: &Ticket, c: &Config, now: u64) -> bool {
+    t.granted.is_none_or(|a| now.saturating_sub(a) < c.rampup_delay_s)
+}
+
+/// Cores measured busy on a CPU reserve; `None` without a fresh measure.
+fn cpu_used_cores(r: Reserve, m: &Measures, c: &Config, now: u64) -> Option<f64> {
+    let pct = cpu_used_pct(r, m, c, now)?;
+    Some(pct * total(r, m, c) as f64 / 100.0)
+}
+
 /// What a ticket still reserves on a reserve: its whole debit during the ramp-up after clearance, then only what it
-/// has not yet raised (the rest is already in the measures). CPU is not measured: it stays whole, as for an orphan.
-pub fn reservation(t: &Ticket, r: Reserve, m: &Measures, c: &Config, now: u64) -> i64 {
+/// has not yet raised (the rest is already in the measures). An orphan keeps its whole debit.
+/// CPU after the ramp-up: the measured load shared between the settled tickets in proportion to their declaration,
+/// within [`CPU_FLOOR`, declared].
+pub fn reservation(e: &State, t: &Ticket, r: Reserve, m: &Measures, c: &Config, now: u64) -> i64 {
     let b = debit(r, t.side, &t.need, m, c);
-    if b == 0 || !r.is_ram() || t.state != TicketState::Active {
+    if b == 0 || t.state != TicketState::Active || ramping_up(t, c, now) {
         return b;
     }
-    if t.granted.is_none_or(|a| now.saturating_sub(a) < c.rampup_delay_s) {
-        return b;
+    if !r.is_ram() {
+        let Some(used) = cpu_used_cores(r, m, c, now) else {
+            return b;
+        };
+        let declared: i64 = e
+            .tickets
+            .iter()
+            .filter(|a| a.state == TicketState::Active && !ramping_up(a, c, now))
+            .map(|a| debit(r, a.side, &a.need, m, c))
+            .sum();
+        let share = (used * b as f64 / declared.max(b) as f64).ceil() as i64;
+        return share.max(CPU_FLOOR).min(b);
     }
     // Tickets granted before these baselines existed: only the available RAM of their main reserve was recorded.
     let main_reserve = t.avail_at_grant_mb.map(|d| d as i64);
@@ -209,7 +261,7 @@ pub fn levels(e: &State, m: &Measures, c: &Config, now: u64) -> [Level; RESERVE_
     RESERVES.map(|r| {
         let mut n = Level { available: available(r, m, c, now), margin: margin(r, c), ..Level::default() };
         for t in e.tickets.iter().filter(|t| t.state != TicketState::Waiting) {
-            let b = reservation(t, r, m, c, now);
+            let b = reservation(e, t, r, m, c, now);
             if b > 0 {
                 n.reserve += b;
                 n.holders.push(t.id);
@@ -233,6 +285,7 @@ pub fn reserve_views(e: &State, m: &Measures, c: &Config, now: u64) -> Vec<Reser
                 reserve: n.reserve,
                 margin: n.margin,
                 free: n.free(),
+                used_pct: cpu_used_pct(r, m, c, now).map(|p| p.round() as u32),
                 exclusive: (r == Reserve::Cpu)
                     .then(|| {
                         e.tickets.iter().find(|t| {
@@ -532,6 +585,7 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
     });
 
     update_swap_pressure(&mut e, m, c, now);
+    update_cpu_pressure(&mut e, m, c, now);
     let mut lev = levels(&e, m, c, now);
     let mut freezes: [Option<Frozen>; RESERVE_COUNT] = [None, None, None, None];
     let mut pressure = Vec::new();
@@ -572,6 +626,32 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
                 orphan: None,
             });
         }
+    }
+    for (r, h) in [(Reserve::CpuWindows, e.cpu_pressure.windows), (Reserve::Cpu, e.cpu_pressure.wsl)] {
+        if !h.on {
+            continue;
+        }
+        let used = cpu_used_pct(r, m, c, now).unwrap_or(0.0);
+        let measured = if r == Reserve::Cpu {
+            let load = format!("{:.1}", fresh_wsl(m, now).map_or(0.0, |w| w.load1));
+            let load = if crate::i18n::current() == crate::i18n::Lang::Fr { load.replace('.', ",") } else { load };
+            tr!("load {load} / {}", "load {load} / {}", cores(c.cpu_total as i64))
+        } else {
+            format!("{used:.0} %")
+        };
+        let since = duration(now.saturating_sub(h.declared_at.unwrap_or(now)));
+        pressure.push(r);
+        freezes[r.i()] = Some(Frozen {
+            cause: tr!("{} saturated ({measured}) for {since}", "{} saturé ({measured}) depuis {since}", r.name()),
+            lifting: tr!(
+                "{} under {} % for {}",
+                "{} sous {} % pendant {}",
+                r.name(),
+                c.cpu_release_pct,
+                duration(c.cpu_pressure_delay_s)
+            ),
+            orphan: None,
+        });
     }
     // A lost link is not an unattended command: reservation kept, without freezing, for the resume delay.
     for t in e
@@ -645,7 +725,11 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
             Block::ManualFreeze
         } else if let Some(r) = RESERVES.into_iter().find(|r| needs[r.i()] > 0 && freezes[r.i()].is_some()) {
             Block::Frozen(r)
-        } else if exclusive && !other_wsl.is_empty() {
+        } else if exclusive
+            && !other_wsl.is_empty()
+            && needs[Reserve::Cpu.i()] > lev[Reserve::Cpu.i()].available - lev[Reserve::Cpu.i()].reserve
+        {
+            // Beyond the margin, an exclusive request still goes when the others' measured load leaves its cores.
             let ends: Option<Vec<u64>> = other_wsl
                 .iter()
                 .map(|a| if a.state == TicketState::Orphaned { None } else { a.planned_end() })
@@ -901,10 +985,10 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
                         hhmm(granted + c.rampup_delay_s)
                     )
                 } else {
-                    let remaining: Vec<String> = [Reserve::RamWindows, Reserve::RamWsl]
+                    let remaining: Vec<String> = RESERVES
                         .into_iter()
                         .filter(|&r| debit(r, t.side, &t.need, m, c) > 0)
-                        .map(|r| format!("{} {}", r.name(), r.amount(reservation(t, r, m, c, now))))
+                        .map(|r| format!("{} {}", r.name(), r.amount(reservation(&e, t, r, m, c, now))))
                         .collect();
                     tr!(
                         " Ramp-up over, still reserved: {}.",

@@ -32,6 +32,9 @@ pub struct Config {
     pub swap_threshold_pct: u64,
     pub swap_release_pct: u64,
     pub swap_out_rate: u64,
+    pub cpu_pressure_pct: u64,
+    pub cpu_release_pct: u64,
+    pub cpu_pressure_delay_s: u64,
 }
 
 impl Default for Config {
@@ -51,7 +54,7 @@ impl Default for Config {
             unattended_delay_s: 90,
             absence_delay_s: 15 * 60,
             recall_delay_s: 120,
-            silence_delay_s: 60,
+            silence_delay_s: 150,
             rampup_delay_s: 180,
             resume_delay_s: 120,
             long_poll_s: 60,
@@ -60,6 +63,9 @@ impl Default for Config {
             swap_threshold_pct: 90,
             swap_release_pct: 85,
             swap_out_rate: 256,
+            cpu_pressure_pct: 85,
+            cpu_release_pct: 70,
+            cpu_pressure_delay_s: 60,
         }
     }
 }
@@ -121,7 +127,8 @@ impl Config {
             let error = |what: String| tr!("config.toml line {number}: {what} ({line})", "config.toml ligne {number} : {what} ({line})");
             let (key, value) = line.split_once('=').ok_or_else(|| error(tr!("`=` expected", "« = » attendu")))?;
             let mut key = key.trim();
-            if let Some((_, english)) = LEGACY_KEYS.iter().find(|(fr, _)| *fr == key) {
+            let legacy_key = LEGACY_KEYS.iter().find(|(fr, _)| *fr == key).map(|(_, en)| *en);
+            if let Some(english) = legacy_key {
                 key = english;
                 legacy = true;
             }
@@ -165,7 +172,13 @@ impl Config {
                 "delay.absence" => c.absence_delay_s = seconds()?,
                 "delay.recall" => c.recall_delay_s = seconds()?,
                 "delay.resume" => c.resume_delay_s = seconds()?,
-                "delay.silence" => c.silence_delay_s = seconds()?,
+                "delay.silence" => {
+                    // 60 s was the old default, shorter than the client's own reconnection patience: take the new one.
+                    let s = seconds()?;
+                    if !(legacy_key.is_some() && s == 60) {
+                        c.silence_delay_s = s;
+                    }
+                }
                 "delay.rampup" => c.rampup_delay_s = seconds()?,
                 "delay.long_poll" => c.long_poll_s = seconds()?,
                 "backfill.max_overtakes" => c.max_overtakes = integer()?,
@@ -173,6 +186,9 @@ impl Config {
                 "swap.threshold" => c.swap_threshold_pct = integer()?.into(),
                 "swap.release_threshold" => c.swap_release_pct = integer()?.into(),
                 "swap.out_rate" => c.swap_out_rate = integer()?.into(),
+                "cpu.pressure" => c.cpu_pressure_pct = integer()?.into(),
+                "cpu.pressure_release" => c.cpu_release_pct = integer()?.into(),
+                "cpu.pressure_delay" => c.cpu_pressure_delay_s = seconds()?,
                 _ => return Err(error(tr!("unknown key", "clé inconnue"))),
             }
         }
@@ -220,7 +236,8 @@ delay.unattended = "{unattended}"
 delay.absence = "{absence}"
 # Clearance taken back if no client acknowledged it within this delay.
 delay.recall = "{recall}"
-# A silent `clearway run` becomes orphaned; longest wait served in one call.
+# A silent `clearway run` becomes orphaned after delay.silence: keep it above 3 missed presences (10 s apart) and
+# the client's reconnection patience (120 s) + 30 s. Longest wait served in one call: delay.long_poll.
 delay.silence = "{silence}"
 delay.long_poll = "{long_poll}"
 # Ramp-up of an active ticket: full reservation during this delay, then only what it has not taken yet.
@@ -238,6 +255,12 @@ backfill.max_head_wait = "{max_head_wait}"
 swap.threshold = {threshold}
 swap.release_threshold = {release}
 swap.out_rate = {out_rate}
+
+# Measured CPU (WSL: 1-min load average over cpu.total; Windows: CPU usage): at or above cpu.pressure (%) for
+# cpu.pressure_delay, no new ticket takes cores on that side; lifted under cpu.pressure_release for as long.
+cpu.pressure = {cpu_pressure}
+cpu.pressure_release = {cpu_release}
+cpu.pressure_delay = "{cpu_delay}"
 "#,
             pipe = self.pipe,
             legacy_pipe = self.legacy_pipe,
@@ -260,6 +283,9 @@ swap.out_rate = {out_rate}
             threshold = self.swap_threshold_pct,
             release = self.swap_release_pct,
             out_rate = self.swap_out_rate,
+            cpu_pressure = self.cpu_pressure_pct,
+            cpu_release = self.cpu_release_pct,
+            cpu_delay = duration_option(self.cpu_pressure_delay_s),
         )
     }
 
@@ -330,6 +356,8 @@ mod tests {
         assert!(legacy);
         assert_eq!(c.pipe, DEFAULT_PIPE, "the old default pipe becomes Clearway's");
         assert_eq!((c.margin_ram_wsl_mb, c.silence_delay_s, c.max_overtakes), (2048, 3, 5));
+        assert_eq!(Config::read("delai.actif = \"60s\"").unwrap().silence_delay_s, 150, "old default replaced");
+        assert_eq!(Config::read("delay.silence = \"60s\"").unwrap().silence_delay_s, 60, "explicit new key kept");
         assert_eq!((c.swap_threshold_pct, c.default_wsl.duration_s), (80, 20 * 60));
         assert_eq!(Config::read_flagged("tube = \"essai-3\"").unwrap().0.pipe, "essai-3", "a custom pipe is kept");
         assert!(!Config::read_flagged(&c.render()).unwrap().1);

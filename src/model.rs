@@ -131,6 +131,22 @@ pub struct State {
     pub swap_pressure: bool,
     #[serde(skip)]
     pub swap_calm_since: Option<u64>,
+    /// Measured CPU pressure per side, with hysteresis: declared, and since when the opposite condition holds.
+    #[serde(skip)]
+    pub cpu_pressure: CpuPressure,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Hysteresis {
+    pub on: bool,
+    pub since: Option<u64>,
+    pub declared_at: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuPressure {
+    pub windows: Hysteresis,
+    pub wsl: Hysteresis,
 }
 
 impl State {
@@ -349,6 +365,9 @@ pub struct ReserveView {
     /// WSL RAM estimated as 12 GB − vmmemWSL for lack of a recent measure: time of the last measure (0: none).
     #[serde(default)]
     pub estimate: Option<u64>,
+    /// Measured use of a CPU reserve, in percent of its budget (WSL: 1-min load average; Windows: CPU usage).
+    #[serde(default)]
+    pub used_pct: Option<u32>,
 }
 
 impl ReserveView {
