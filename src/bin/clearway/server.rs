@@ -552,8 +552,8 @@ impl Server {
             ui::Color::Red
         } else if waiting > 0 {
             ui::Color::Orange
-        } else if actives > 0 {
-            ui::Color::Blue
+        } else if self.measures.vmmem.is_none() {
+            ui::Color::Grey
         } else {
             ui::Color::Green
         };

@@ -173,6 +173,8 @@ pub fn open(visible: bool) {
             wc.hInstance = instance;
             wc.lpszClassName = class.as_ptr();
             wc.hbrBackground = (15 + 1) as HBRUSH;
+            // Resource 1: the icon linked by build.rs; null (default icon) if the exe was built without it.
+            wc.hIcon = windows_sys::Win32::UI::WindowsAndMessaging::LoadIconW(instance, 1 as _);
             wc.hCursor = windows_sys::Win32::UI::WindowsAndMessaging::LoadCursorW(
                 std::ptr::null_mut(),
                 windows_sys::Win32::UI::WindowsAndMessaging::IDC_ARROW,

@@ -4,11 +4,12 @@ use std::sync::{Arc, OnceLock};
 use crate::server::Shared;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Icon colors: queue free, queue loaded, pressure or freeze, WSL stopped.
 pub enum Color {
     Green,
-    Blue,
     Orange,
     Red,
+    Grey,
 }
 
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
@@ -141,31 +142,27 @@ mod native {
         ICONS.get().map_or(std::ptr::null_mut(), |i| i[c as usize] as HICON)
     }
 
-    fn create_icon(c: Color) -> HICON {
-        let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as usize;
-        let (r, g, b) = match c {
-            Color::Green => (0x2e, 0x9d, 0x4f),
-            Color::Blue => (0x2f, 0x6f, 0xd6),
-            Color::Orange => (0xf0, 0x8c, 0x1a),
-            Color::Red => (0xd6, 0x2f, 0x2f),
+    /// Raw BGRA images drawn by scripts/draw_icon.py, one per small-icon size (DPI).
+    macro_rules! tray {
+        ($color:literal) => {
+            [
+                (16, &include_bytes!(concat!("../../../assets/icon/tray-", $color, "-16.bgra"))[..]),
+                (20, &include_bytes!(concat!("../../../assets/icon/tray-", $color, "-20.bgra"))[..]),
+                (24, &include_bytes!(concat!("../../../assets/icon/tray-", $color, "-24.bgra"))[..]),
+                (32, &include_bytes!(concat!("../../../assets/icon/tray-", $color, "-32.bgra"))[..]),
+            ]
         };
-        let center = size as f32 / 2.0;
-        let radius = size as f32 * 0.45;
-        let mut colors = vec![0u8; size * size * 4];
-        for y in 0..size {
-            for x in 0..size {
-                let dx = x as f32 + 0.5 - center;
-                let dy = y as f32 + 0.5 - center;
-                let d = (dx * dx + dy * dy).sqrt();
-                let coverage = (radius + 0.5 - d).clamp(0.0, 1.0);
-                let edge = if d > radius - 1.5 { 0.65 } else { 1.0 };
-                let p = (y * size + x) * 4;
-                colors[p] = (b as f32 * edge) as u8;
-                colors[p + 1] = (g as f32 * edge) as u8;
-                colors[p + 2] = (r as f32 * edge) as u8;
-                colors[p + 3] = (coverage * 255.0) as u8;
-            }
-        }
+    }
+
+    fn create_icon(c: Color) -> HICON {
+        let images: [(usize, &[u8]); 4] = match c {
+            Color::Green => tray!("green"),
+            Color::Orange => tray!("orange"),
+            Color::Red => tray!("red"),
+            Color::Grey => tray!("grey"),
+        };
+        let wanted = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as usize;
+        let (size, colors) = images.into_iter().find(|(s, _)| *s >= wanted).unwrap_or(images[3]);
         let masked = vec![0u8; size.div_ceil(16) * 2 * size];
         unsafe {
             CreateIcon(
@@ -370,7 +367,7 @@ mod native {
         let _ = LOG.set(log);
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetProcessDPIAware() };
         ICONS.get_or_init(|| {
-            [Color::Green, Color::Blue, Color::Orange, Color::Red].map(|c| create_icon(c) as usize)
+            [Color::Green, Color::Orange, Color::Red, Color::Grey].map(|c| create_icon(c) as usize)
         });
         let class = wide("ClearwayService");
         let title = wide("Clearway (service)");
