@@ -41,8 +41,7 @@ claude plugin marketplace add AW-HTK/clearway && claude plugin install clearway@
 codex plugin marketplace add AW-HTK/clearway && codex plugin add clearway@clearway
 ```
 
-Codex clones `owner/repo` over HTTPS without credentials: while the repository is private, give it the SSH URL
-(`codex plugin marketplace add git@github.com:AW-HTK/clearway.git`). In Claude Code the tools are named `mcp__plugin_clearway_clearway__<tool>`. Codex reads the same
+In Claude Code the tools are named `mcp__plugin_clearway_clearway__<tool>`. Codex reads the same
 `.claude-plugin/marketplace.json` and the plugin's `.codex-plugin/plugin.json`.
 
 ## Files
