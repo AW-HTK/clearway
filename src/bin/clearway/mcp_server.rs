@@ -80,7 +80,7 @@ pub fn main(args: &[String]) -> i32 {
         branch,
     };
     let default_side = if cfg!(windows) { Side::Windows } else { Side::Wsl };
-    let settings = Settings { default_max_s: max_s, default_side, ..Settings::default() };
+    let settings = Settings { default_max_s: max_s, default_side, locate: Some(location), ..Settings::default() };
     let tools = Arc::new(Tools::new(channel.clone(), info, settings));
     let server_info = Tools::<Linked<Transport>>::info();
     clearway::mcp::serve(tools, &server_info, std::io::stdin().lock(), std::io::stdout(), &log);
@@ -94,8 +94,8 @@ type Transport = Relay;
 type Transport = Pipe;
 
 #[cfg(unix)]
-fn location(_dir: &str) -> (Option<String>, Option<String>) {
-    let (project, branch) = crate::client::git_location();
+fn location(dir: &str) -> (Option<String>, Option<String>) {
+    let (project, branch) = crate::client::git_location_in(std::path::Path::new(dir));
     (Some(project), branch)
 }
 

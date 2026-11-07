@@ -13,14 +13,14 @@ const SHELL_TOOLS: [&str; 5] = ["Bash", "PowerShell", "shell", "exec_command", "
 const WRAPPERS: [&str; 10] = ["sudo", "time", "nice", "ionice", "nohup", "env", "exec", "command", "stdbuf", "chrt"];
 
 /// Heavy whatever their arguments.
-const ALWAYS: [&str; 26] = [
+const ALWAYS: [&str; 28] = [
     "rustc", "make", "gmake", "nmake", "mingw32-make", "ninja", "msbuild", "bazel", "bazelisk", "mvn", "mvnw",
     "gradle", "gradlew", "pytest", "tox", "nox", "vitest", "jest", "playwright", "cypress", "webpack", "tsc",
-    "turbo", "nx", "blender", "ffmpeg",
+    "vue-tsc", "svelte-check", "turbo", "nx", "blender", "ffmpeg",
 ];
 
 /// Heavy with one of these first arguments.
-const BY_SUBCOMMAND: [(&str, &[&str]); 12] = [
+const BY_SUBCOMMAND: [(&str, &[&str]); 13] = [
     (
         "cargo",
         &[
@@ -33,7 +33,8 @@ const BY_SUBCOMMAND: [(&str, &[&str]); 12] = [
     ("swift", &["build", "test"]),
     ("vite", &["build"]),
     ("next", &["build"]),
-    ("nuxt", &["build", "generate"]),
+    ("nuxt", &["build", "generate", "typecheck", "test"]),
+    ("nuxi", &["build", "generate", "typecheck", "test"]),
     ("astro", &["build"]),
     ("ng", &["build", "test"]),
     ("ollama", &["run", "pull", "create", "serve"]),
@@ -83,8 +84,8 @@ fn first_word<'a>(words: &[&'a str]) -> Option<(usize, &'a str)> {
 fn package_script(words: &[&str]) -> bool {
     let Some((i, sub)) = first_word(words) else { return false };
     let script = if sub == "run" || sub == "run-script" { first_word(&words[i + 1..]).map_or("", |(_, w)| w) } else { sub };
-    matches!(script, "test" | "t" | "build" | "e2e")
-        || ["build:", "test:", "e2e"].iter().any(|p| script.starts_with(p))
+    matches!(script, "test" | "t" | "build" | "e2e" | "typecheck" | "type-check" | "tsc" | "vitest" | "jest" | "playwright")
+        || ["build:", "test:", "e2e", "typecheck:", "type-check:"].iter().any(|p| script.starts_with(p))
 }
 
 /// The heavy command found in one simple command (no `&&`, `|`…), as `program subcommand`.
@@ -122,6 +123,14 @@ fn heavy_words(words: &[&str], depth: u8) -> Option<String> {
     }
     if matches!(p.as_str(), "npm" | "pnpm" | "yarn" | "bun") && package_script(rest) {
         return Some(label(first_word(rest).map(|(_, w)| w)));
+    }
+    // `pnpm vitest run`, `yarn tsc`: these managers also run a package's binary by its name.
+    if matches!(p.as_str(), "pnpm" | "yarn" | "bun")
+        && depth < 3
+        && let Some((j, tool)) = first_word(rest)
+        && (ALWAYS.contains(&tool) || BY_SUBCOMMAND.iter().any(|(name, _)| *name == tool))
+    {
+        return heavy_words(&rest[j..], depth + 1);
     }
     if p.starts_with("python") || p == "py" {
         let m = rest.iter().position(|w| *w == "-m")?;
@@ -330,17 +339,31 @@ fn owned_by(t: &TicketView, session_id: &str, ancestors: &[u32]) -> bool {
     same_session || same_codex
 }
 
+/// Shell tool of Codex, whose sandbox cannot start Windows programs, hence not `clearway run` either.
+pub fn codex_tool(input: &Value) -> bool {
+    matches!(input["tool_name"].as_str(), Some("exec_command" | "shell" | "local_shell"))
+}
+
 /// Allows the heavy command `what` when the session holds an active ticket; `ancestors`: pids of the hook's parents.
-pub fn decide(what: &str, command: &str, session_id: &str, ancestors: &[u32], tickets: &[TicketView]) -> Verdict {
+pub fn decide(what: &str, command: &str, session_id: &str, ancestors: &[u32], codex: bool, tickets: &[TicketView]) -> Verdict {
     let mine: Vec<&TicketView> = tickets.iter().filter(|t| owned_by(t, session_id, ancestors)).collect();
     if mine.iter().any(|t| t.state == TicketState::Active) {
         return Verdict::Allow;
     }
     let short: String = command.chars().take(120).collect();
-    let wrap = tr!(
-        "Or wrap it, which waits and releases by itself: clearway run \"<what>\" -- {short}",
-        "Ou enveloppe-la, ce qui attend et libère tout seul : clearway run \"<quoi>\" -- {short}"
-    );
+    let wrap = if codex {
+        tr!(
+            "Only through these MCP tools: `clearway run` cannot reach Windows from the Codex sandbox. In a git worktree, \
+             pass its folder as `dir` to request_clearance.",
+            "Uniquement par ces outils MCP : `clearway run` ne peut pas joindre Windows depuis le bac à sable de Codex. \
+             Dans un worktree git, passe son dossier en `dir` à request_clearance."
+        )
+    } else {
+        tr!(
+            "Or wrap it, which waits and releases by itself: clearway run \"<what>\" -- {short}",
+            "Ou enveloppe-la, ce qui attend et libère tout seul : clearway run \"<quoi>\" -- {short}"
+        )
+    };
     if let Some(t) = mine.iter().find(|t| t.state != TicketState::Active) {
         let id = t.id;
         return Verdict::Deny(tr!(

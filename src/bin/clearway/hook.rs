@@ -35,7 +35,7 @@ pub fn main(_args: &[String]) -> i32 {
         }
     };
     let ancestors: Vec<u32> = crate::mcp_server::ancestors().iter().map(|p| p.pid).collect();
-    if let Verdict::Deny(reason) = hook::decide(&what, &command, &session_id, &ancestors, &status.tickets) {
+    if let Verdict::Deny(reason) = hook::decide(&what, &command, &session_id, &ancestors, hook::codex_tool(&input), &status.tickets) {
         let mut out = std::io::stdout().lock();
         let _ = writeln!(out, "{}", hook::deny_output(&reason));
         let _ = out.flush();

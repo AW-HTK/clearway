@@ -40,7 +40,11 @@ pub struct Settings {
     pub retry_pause: Duration,
     /// Side of a request that does not say: where the MCP server runs.
     pub default_side: Side,
+    /// Project and branch text of a folder, for a request that names its working folder (`dir`).
+    pub locate: Option<Locate>,
 }
+
+pub type Locate = fn(&str) -> (Option<String>, Option<String>);
 
 impl Default for Settings {
     fn default() -> Self {
@@ -50,6 +54,7 @@ impl Default for Settings {
             progress_every_s: 60,
             retry_pause: Duration::from_secs(2),
             default_side: Side::Wsl,
+            locate: None,
         }
     }
 }
@@ -249,6 +254,14 @@ impl<C: Channel> Tools<C> {
                     .ok_or_else(|| tr!("unreadable `duration` (e.g. \"30m\")", "`duration` illisible (ex. « 30m »)"))?,
             ),
         };
+        // A Codex MCP server serves every thread of its app-server: the agent names the worktree it works in.
+        let (dir, project, branch) = match (arguments["dir"].as_str().map(str::trim).filter(|d| !d.is_empty()), self.settings.locate) {
+            (Some(d), Some(locate)) => {
+                let (project, branch) = locate(d);
+                (d.to_owned(), project, branch)
+            }
+            _ => (self.session.dir.clone(), self.session.project.clone(), self.session.branch.clone()),
+        };
         let request_id = crate::system::random(8).map(|b| crate::system::hex(&b)).unwrap_or_default();
         let body = TicketRequest {
             request_id,
@@ -260,13 +273,13 @@ impl<C: Channel> Tools<C> {
             session: self.session.name.clone(),
             claude_session_id: self.session.claude_session_id.clone(),
             claude_pid: self.session.claude_pid,
-            dir: self.session.dir.clone(),
+            dir,
             signature: "mcp".into(),
             measures: None,
             manual: true,
             reattach_key: String::new(),
-            project: self.session.project.clone(),
-            branch: self.session.branch.clone(),
+            project,
+            branch,
             ack: true,
         };
         let response = match self.call_server("POST", "/tickets", serde_json::to_value(&body).map_err(|e| e.to_string())?) {
@@ -374,6 +387,10 @@ impl<C: Channel> Provider for Tools<C> {
                     "ram": { "type": "string", "description": tr!("Peak RAM, e.g. \"6G\"", "RAM au pic, ex. « 6G »") },
                     "cpu": { "type": "integer", "description": tr!("Cores", "Cœurs") },
                     "duration": { "type": "string", "description": tr!("Expected duration, e.g. \"30m\" (the lease)", "Durée prévue, ex. « 30m » (le bail)") },
+                    "dir": { "type": "string", "description": tr!(
+                        "Absolute folder the heavy task runs in, when it is not the session's (a git worktree): the queue shows its branch",
+                        "Dossier absolu où tourne la tâche lourde, s'il n'est pas celui de la session (un worktree git) : la file affiche sa branche"
+                    ) },
                     "max_s": max_s
                 }), &["description"]),
             }),

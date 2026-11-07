@@ -16,7 +16,9 @@ minute, or the GPU.
    - `description`: what the task is, in a few words (shown to the user in the queue);
    - `ram` at peak (`"6G"`), `cpu` cores, `duration` (`"20m"`, the lease) — estimate them honestly; when
      unsure, leave them out and the defaults apply;
-   - `side`: `wsl` or `windows`, where the command runs.
+   - `side`: `wsl` or `windows`, where the command runs;
+   - `dir`: the absolute folder the command runs in, when it is not the session's folder (a git worktree, for
+     instance), so that the queue shows the right branch.
 
    The call waits until it is your turn and may take minutes. Do nothing else heavy meanwhile.
 2. **Read the result.**
@@ -34,6 +36,9 @@ minute, or the GPU.
 when they ask why the task has not started.
 
 ## Without the MCP server
+
+In Codex, always use the tools: its sandbox cannot start Windows programs, so `clearway run` and
+`clearway status` cannot reach Clearway from there.
 
 If the `clearway` tools are not available, wrap the command instead:
 

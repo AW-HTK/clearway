@@ -297,6 +297,11 @@ struct Client {
 }
 
 /// The relay could not be started through WSL interop (vsock, exec failure), as opposed to Clearway being down.
+/// The WSL interop socket refused, as in the Codex sandbox: retrying cannot help.
+fn sandboxed(message: &str) -> bool {
+    message.contains("UtilBindVsockAnyPort")
+}
+
 fn interop_failure(message: &str) -> bool {
     message.contains("WSL ERROR")
         || message.contains("vsock")
@@ -461,6 +466,14 @@ impl Client {
             }
             if signal_received() {
                 return Err(interrupted());
+            }
+            if sandboxed(&last) {
+                return Err(tr!(
+                    "this sandbox cannot start Windows programs (WSL interop refused), so it cannot reach Clearway: \
+                     use the clearway MCP tools (request_clearance, then release) instead of this command.",
+                    "ce bac à sable ne peut pas lancer de programme Windows (interop WSL refusée), donc pas joindre \
+                     Clearway : utilise les outils MCP clearway (request_clearance, puis release) au lieu de cette commande."
+                ));
             }
             let maintenance = absent && self.in_maintenance();
             if absent && !maintenance && !self.launched {
@@ -697,8 +710,14 @@ fn name_of(path: &Path) -> String {
 
 /// (directory, branch / worktree) of the current directory, from one git call capped at 2 s: repos on /mnt/g are slow.
 pub(crate) fn git_location() -> (String, Option<String>) {
-    let current = std::env::current_dir().unwrap_or_default();
+    git_location_in(&std::env::current_dir().unwrap_or_default())
+}
+
+/// Project folder and branch text of the git repository holding `dir`.
+pub(crate) fn git_location_in(dir: &Path) -> (String, Option<String>) {
+    let current = dir.to_path_buf();
     let mut child = match Command::new("git")
+        .current_dir(&current)
         .args(["rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD", "--short", "HEAD"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
