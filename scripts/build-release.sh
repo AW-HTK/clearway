@@ -6,6 +6,7 @@
 # CLEARWAY_RELEASE_SIGNING_KEY (for instance: bws-get run -- scripts/build-release.sh).
 set -eu
 cd "$(dirname "$0")/.."
+jobs=${CLEARWAY_BUILD_JOBS:-4}
 
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 plugin_version() { sed -n 's/.*"version": "\([^"]*\)".*/\1/p' | head -1; }
@@ -18,18 +19,20 @@ if [ "$claude" != "$version" ] || [ "$codex" != "$version" ]; then
 fi
 [ -n "${CLEARWAY_RELEASE_SIGNING_KEY:-}" ] || { echo "CLEARWAY_RELEASE_SIGNING_KEY missing" >&2; exit 1; }
 
-cargo zigbuild --release -j 4 --target x86_64-pc-windows-gnu --bin clearway
-cargo zigbuild --release -j 4 --target x86_64-unknown-linux-musl --bin clearway
-cargo build --release -j 4 --example sign_release
+cargo zigbuild --locked --release -j "$jobs" --target x86_64-pc-windows-gnu --bin clearway
+cargo zigbuild --locked --release -j "$jobs" --target x86_64-unknown-linux-musl --bin clearway
+cargo build --locked --release -j "$jobs" --example sign_release
 mkdir -p dist
 cp target/x86_64-pc-windows-gnu/release/clearway.exe dist/clearway.exe
 cp target/x86_64-unknown-linux-musl/release/clearway dist/clearway-x86_64-linux
 cp windows/install.ps1 windows/uninstall.ps1 install.sh dist/
+cp assets/fonts/FONT-LICENSES.txt dist/
 printf '%s\n' "$version" > dist/VERSION
-(cd dist && sha256sum clearway.exe clearway-x86_64-linux install.ps1 uninstall.ps1 install.sh VERSION > SHA256SUMS)
-cargo zigbuild --release -j 4 --target x86_64-pc-windows-gnu --features setup --bin clearway-setup
+(cd dist && sha256sum clearway.exe clearway-x86_64-linux install.ps1 uninstall.ps1 install.sh VERSION FONT-LICENSES.txt > SHA256SUMS)
+CLEARWAY_BUNDLE_DIR="$PWD/dist" cargo zigbuild --locked --release -j "$jobs" --target x86_64-pc-windows-gnu --features setup --bin clearway-setup
 cp target/x86_64-pc-windows-gnu/release/clearway-setup.exe dist/
 (cd dist && sha256sum clearway-setup.exe >> SHA256SUMS)
 target/release/examples/sign_release sign dist/SHA256SUMS
+target/release/examples/sign_release verify dist/SHA256SUMS
 cat dist/SHA256SUMS
 echo "Publish: dist/clearway-setup.exe dist/SHA256SUMS dist/SHA256SUMS.sig"

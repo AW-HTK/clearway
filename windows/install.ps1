@@ -84,6 +84,10 @@ try {
         Rename-Item $exe $previous
     }
     Move-Item $new $exe
+    # Font licences travel with the setup, including when installing offline.
+    if ($env:CLEARWAY_SOURCE -and $env:CLEARWAY_SOURCE -notmatch '^https?://' -and (Test-Path (Join-Path $env:CLEARWAY_SOURCE 'FONT-LICENSES.txt'))) {
+        Copy-Item (Join-Path $env:CLEARWAY_SOURCE 'FONT-LICENSES.txt') (Join-Path $dir 'FONT-LICENSES.txt') -Force
+    }
     Say "clearway.exe $version installed in $dir." "clearway.exe $version installé dans $dir."
     if ($env:CLEARWAY_SETUP_EXE) { Register-Uninstall $env:CLEARWAY_SETUP_EXE }
 } finally {

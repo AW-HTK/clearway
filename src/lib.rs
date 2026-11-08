@@ -13,3 +13,5 @@ pub mod setup;
 pub mod system;
 pub mod tools;
 pub mod update;
+#[cfg(windows)]
+pub mod visual;

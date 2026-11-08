@@ -20,10 +20,13 @@ cargo clippy --all-targets -- -D warnings
 cargo zigbuild --release --target x86_64-pc-windows-gnu --bin clearway   # clearway.exe (needs cargo-zigbuild)
 ```
 
-Every pull request runs the same tests and clippy on Linux and Windows (GitHub Actions). For a first-time contributor,
+Every pull request runs tests and clippy on Linux, plus clippy and a release build on Windows (GitHub Actions). For a first-time contributor,
 the maintainer starts these runs after a first look at the change.
 
 ## Pull requests
+
+For Windows UI changes, use the [approved visual references](docs/design/README.md) and the shared theme in
+`src/visual.rs`. Both the application and the setup use the same palette and bundled fonts.
 
 - One topic per pull request, with tests for what changes.
 - `main` only changes through pull requests. The maintainer reviews each one and tests it on a real Windows machine,

@@ -19,14 +19,15 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MARKETPLACE: &str = "AW-HTK/clearway";
 const PLUGIN: &str = "clearway@clearway";
 
-const FILES: [(&str, &[u8]); 7] = [
-    ("clearway.exe", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/clearway.exe"))),
-    ("clearway-x86_64-linux", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/clearway-x86_64-linux"))),
-    ("install.ps1", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/install.ps1"))),
-    ("uninstall.ps1", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/uninstall.ps1"))),
-    ("install.sh", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/install.sh"))),
-    ("SHA256SUMS", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/SHA256SUMS"))),
-    ("VERSION", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/VERSION"))),
+const FILES: [(&str, &[u8]); 8] = [
+    ("FONT-LICENSES.txt", include_bytes!("../../../assets/fonts/FONT-LICENSES.txt")),
+    ("clearway.exe", include_bytes!(concat!(env!("CLEARWAY_BUNDLE_DIR"), "/clearway.exe"))),
+    ("clearway-x86_64-linux", include_bytes!(concat!(env!("CLEARWAY_BUNDLE_DIR"), "/clearway-x86_64-linux"))),
+    ("install.ps1", include_bytes!(concat!(env!("CLEARWAY_BUNDLE_DIR"), "/install.ps1"))),
+    ("uninstall.ps1", include_bytes!(concat!(env!("CLEARWAY_BUNDLE_DIR"), "/uninstall.ps1"))),
+    ("install.sh", include_bytes!(concat!(env!("CLEARWAY_BUNDLE_DIR"), "/install.sh"))),
+    ("SHA256SUMS", include_bytes!(concat!(env!("CLEARWAY_BUNDLE_DIR"), "/SHA256SUMS"))),
+    ("VERSION", include_bytes!(concat!(env!("CLEARWAY_BUNDLE_DIR"), "/VERSION"))),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -950,6 +951,10 @@ pub fn main() -> i32 {
     share_language();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
+    // Preview has priority over every mutating option, including --yes and --uninstall.
+    if has("--preview") {
+        return crate::gui::run(false, true);
+    }
     let (yes, uninstall) = (has("--yes"), has("--uninstall"));
     let text = yes || has("--dry-run") || has("--check");
     if text {
@@ -974,5 +979,5 @@ pub fn main() -> i32 {
         let _ = std::io::stdout().flush();
         return code;
     }
-    crate::gui::run(uninstall)
+    crate::gui::run(uninstall, false)
 }
