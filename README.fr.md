@@ -89,9 +89,10 @@ ils installent aussi depuis un dossier `dist/` local (`CLEARWAY_SOURCE=<dist>`).
 <details>
 <summary><strong>Plugins (Claude Code et Codex)</strong></summary>
 
-Ce dépôt sert de catalogue de plugins (marketplace) pour les deux. Le plugin (`plugins/clearway/`) apporte le serveur MCP
-`clearway` (`clearway mcp`, donc `clearway` ou `clearway.exe` doit être dans le `PATH`), la skill `heavy-tasks`, un hook
-PreToolUse (`clearway hook`) et, pour Claude Code, l'agent `clearance-waiter`. Sans le setup :
+Ce dépôt sert de catalogue de plugins (marketplace) pour les deux. Le plugin (`plugins/clearway/`) apporte le
+serveur MCP `clearway` (`clearway mcp`, donc `clearway` ou `clearway.exe` doit être dans le `PATH`), la compétence
+(skill) `heavy-tasks`, un hook PreToolUse (`clearway hook`) et, pour Claude Code, l'agent `clearance-waiter`. Sans le
+setup :
 
 ```sh
 claude plugin marketplace add AW-HTK/clearway && claude plugin install clearway@clearway --scope user
