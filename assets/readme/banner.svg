@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="Clearway: heavy tasks take turns, your machine stays usable">
+  <rect width="1280" height="420" rx="16" fill="#0d1722"/>
+  <g transform="translate(64 64)">
+    <g fill="none" stroke="#2eaa5a" stroke-linecap="round" stroke-linejoin="round" transform="translate(-4 -4) scale(1.125)">
+      <path d="M43.531 50.453A21.76 21.76 0 1 1 43.531 13.547" stroke-width="10.24"/>
+      <path d="M33.088 23.68L41.408 32L33.088 40.32" stroke-width="7.68"/>
+    </g>
+    <text x="88" y="34" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="40" font-weight="700" fill="#e8eef4">Clearway</text>
+    <text x="90" y="62" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#a9b8c6">Heavy tasks take turns. Your machine stays usable.</text>
+  </g>
+  <g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif">
+    <g transform="translate(64 176)">
+      <rect width="368" height="96" rx="10" fill="#142231" stroke="#22364a"/>
+      <text x="20" y="32" font-family="Consolas, Menlo, monospace" font-size="14" fill="#6fd39b">#41 · CLEARED</text>
+      <text x="20" y="58" font-size="17" font-weight="600" fill="#e8eef4">Claude · cargo test</text>
+      <text x="20" y="80" font-size="14" fill="#93a5b6">wsl · 3 GB · 4 cores</text>
+    </g>
+    <g transform="translate(456 176)">
+      <rect width="368" height="96" rx="10" fill="#142231" stroke="#22364a"/>
+      <text x="20" y="32" font-family="Consolas, Menlo, monospace" font-size="14" fill="#f2b544">#42 · HOLDING · 1st</text>
+      <text x="20" y="58" font-size="17" font-weight="600" fill="#e8eef4">Codex · pnpm typecheck</text>
+      <text x="20" y="80" font-size="14" fill="#93a5b6">wsl · 2 GB · 2 cores</text>
+    </g>
+    <g transform="translate(848 176)">
+      <rect width="368" height="96" rx="10" fill="#142231" stroke="#22364a"/>
+      <text x="20" y="32" font-family="Consolas, Menlo, monospace" font-size="14" fill="#f2b544">#43 · HOLDING · 2nd</text>
+      <text x="20" y="58" font-size="17" font-weight="600" fill="#e8eef4">Claude · dotnet build</text>
+      <text x="20" y="80" font-size="14" fill="#93a5b6">windows · 4 GB · 6 cores</text>
+    </g>
+    <text x="64" y="324" font-size="14" fill="#93a5b6">RAM Windows</text>
+    <text x="1216" y="324" text-anchor="end" font-family="Consolas, Menlo, monospace" font-size="14" fill="#93a5b6">used 21.4 · reserved 3.0 · margin 1.5 · free 6.0 GB</text>
+    <rect x="64" y="338" width="1152" height="12" rx="6" fill="#1c2d3e"/>
+    <path d="M70 338h762v12H70a6 6 0 0 1 0-12z" fill="#4b8fd6"/>
+    <rect x="832" y="338" width="104" height="12" fill="#16a35a"/>
+    <rect x="936" y="338" width="58" height="12" fill="#54677a"/>
+  </g>
+</svg>
