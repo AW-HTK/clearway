@@ -1,7 +1,7 @@
 <p align="center"><a href="README.md">English</a> · <strong>Français</strong></p>
 
 <p align="center">
-  <img src="assets/readme/banner.fr.svg" alt="Clearway : les tâches lourdes passent chacune leur tour, la machine reste utilisable" width="100%">
+  <img src="assets/readme/banner.fr.svg" alt="Clearway : les tâches lourdes passent chacune à son tour, la machine reste utilisable" width="100%">
 </p>
 
 <p align="center">
@@ -11,10 +11,10 @@
   <a href="LICENSE"><img alt="Licence MIT" src="https://img.shields.io/badge/licence-MIT-0b63c4"></a>
 </p>
 
-Plusieurs sessions d'IA de code sur un même PC lancent chacune un build, une suite de tests ou un modèle local au
-même moment, et la machine se fige. **Clearway** est une petite file d'attente qui vit à côté de l'horloge : avant une
-tâche lourde, la session demande un créneau, attend son tour, lance sa tâche, puis libère le créneau. Une garde refuse
-les commandes lourdes lancées sans créneau.
+Plusieurs sessions de programmation assistée par IA sur un même PC lancent chacune un build, une suite de tests ou
+un modèle local au même moment, et la machine se fige. **Clearway** est une petite file d'attente qui vit à côté de
+l'horloge : avant une tâche lourde, la session demande un créneau, attend son tour, lance sa tâche, puis libère le
+créneau. Une garde refuse les commandes lourdes lancées sans créneau.
 
 ## Comment ça marche
 
@@ -54,7 +54,7 @@ Blocked by hook
   request_clearance, lance la commande au feu vert, puis appelle release.
 ```
 
-Les builds, suites de tests, vérifications de types, rendus, builds docker et modèles locaux sont lourds ; tout le
+Les builds, suites de tests, vérifications de types, rendus, builds Docker et modèles locaux sont lourds ; tout le
 reste passe librement. Si Clearway ne répond pas en 2 secondes, la garde laisse passer la commande : elle ne bloque
 jamais une session. `CLEARWAY_HOOK=off` la désactive.
 
@@ -89,7 +89,7 @@ ils installent aussi depuis un dossier `dist/` local (`CLEARWAY_SOURCE=<dist>`).
 <details>
 <summary><strong>Plugins (Claude Code et Codex)</strong></summary>
 
-Ce dépôt est un marketplace de plugins pour les deux. Le plugin (`plugins/clearway/`) apporte le serveur MCP
+Ce dépôt sert de catalogue de plugins (marketplace) pour les deux. Le plugin (`plugins/clearway/`) apporte le serveur MCP
 `clearway` (`clearway mcp`, donc `clearway` ou `clearway.exe` doit être dans le `PATH`), la skill `heavy-tasks`, un hook
 PreToolUse (`clearway hook`) et, pour Claude Code, l'agent `clearance-waiter`. Sans le setup :
 
@@ -167,7 +167,7 @@ programme Windows ne peut démarrer : Codex passe donc uniquement par les outils
 </details>
 
 <details>
-<summary><strong>Build et tests</strong></summary>
+<summary><strong>Compilation et tests</strong></summary>
 
 `scripts/build-release.sh` construit tous les fichiers de la version dans `dist/` (il faut cargo-zigbuild, les cibles
 `x86_64-pc-windows-gnu` et `x86_64-unknown-linux-musl`, et la graine de signature dans `CLEARWAY_RELEASE_SIGNING_KEY` ;

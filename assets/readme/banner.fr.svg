@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="Clearway : les tâches lourdes passent chacune leur tour, la machine reste utilisable">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="Clearway : les tâches lourdes passent chacune à son tour, la machine reste utilisable">
   <rect width="1280" height="420" rx="16" fill="#0d1722"/>
   <g transform="translate(64 64)">
     <g fill="none" stroke="#2eaa5a" stroke-linecap="round" stroke-linejoin="round" transform="translate(-4 -4) scale(1.125)">
@@ -6,7 +6,7 @@
       <path d="M33.088 23.68L41.408 32L33.088 40.32" stroke-width="7.68"/>
     </g>
     <text x="88" y="34" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="40" font-weight="700" fill="#e8eef4">Clearway</text>
-    <text x="90" y="62" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#a9b8c6">Les tâches lourdes passent chacune leur tour. La machine reste utilisable.</text>
+    <text x="90" y="62" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#a9b8c6">Les tâches lourdes passent chacune à son tour. La machine reste utilisable.</text>
   </g>
   <g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif">
     <g transform="translate(64 176)">
