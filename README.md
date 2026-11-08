@@ -13,7 +13,7 @@
 
 Several AI coding sessions on one PC each start a build, a test suite or a local model at the same moment, and the
 machine freezes. **Clearway** is a small queue that lives next to the clock: before a heavy task, a session asks for a
-slot, waits for its turn, runs, then releases. A guard refuses heavy commands started without a slot.
+slot, waits for its turn, runs the task, then releases the slot. A guard refuses heavy commands started without a slot.
 
 ## How it works
 
@@ -52,7 +52,7 @@ Blocked by hook
   request_clearance, run the command once cleared, then call release.
 ```
 
-Builds, test suites, type checks, renders, docker builds and local models count as heavy; everything else runs freely.
+Builds, test suites, type checks, renders, Docker builds and local models count as heavy; everything else runs freely.
 If Clearway does not answer within 2 seconds, the guard lets the command through: it never locks a session out.
 `CLEARWAY_HOOK=off` turns it off.
 

@@ -13,7 +13,7 @@
   documentation existe en anglais (par défaut) et en français ; les messages affichés passent par
   `tr!("english", "français")`.
 
-## Build et tests
+## Compilation et tests
 
 ```sh
 cargo test                                                   # unitaires + intégration (serveur Linux sur socket Unix)
@@ -21,8 +21,8 @@ cargo clippy --all-targets -- -D warnings
 cargo zigbuild --release --target x86_64-pc-windows-gnu --bin clearway   # clearway.exe (il faut cargo-zigbuild)
 ```
 
-Chaque pull request lance les mêmes tests et clippy sous Linux et Windows (GitHub Actions). Pour une première
-contribution, le mainteneur lance ces exécutions après un premier regard sur le changement.
+Chaque pull request lance les mêmes tests et `clippy` sous Linux et Windows (GitHub Actions). Pour une première
+contribution, le mainteneur déclenche ces vérifications après un premier examen des modifications.
 
 ## Pull requests
 
