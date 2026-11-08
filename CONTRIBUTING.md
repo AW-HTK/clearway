@@ -1,3 +1,5 @@
+<p align="center"><strong>English</strong> · <a href="CONTRIBUTING.fr.md">Français</a></p>
+
 <p align="center"><img src="assets/readme/logo.svg" alt="" width="72"></p>
 
 <h1 align="center">Contributing to Clearway</h1>
@@ -7,8 +9,8 @@
 ## Before you start
 
 - For anything larger than a small fix, open an issue first so that we agree on the approach.
-- Clearway targets Windows 10/11, with or without WSL. Code, identifiers, docs and commit subjects are in English;
-  user-facing messages go through `tr!("english", "français")`.
+- Clearway targets Windows 10/11, with or without WSL. Code, identifiers and commit subjects are in English; the
+  docs exist in English (the default) and French; user-facing messages go through `tr!("english", "français")`.
 
 ## Build and test
 
@@ -28,6 +30,8 @@ the maintainer starts these runs after a first look at the change.
   with and without WSL, before merging; this can take a while.
 - Clearway has one version: `Cargo.toml`, `Cargo.lock` and both plugin manifests (`plugins/clearway/.claude-plugin/`
   and `.codex-plugin/`) move together at each release, even when the plugin itself did not change.
+- A documentation change is made in both languages (`README.md` and `README.fr.md`, `CONTRIBUTING.md` and
+  `CONTRIBUTING.fr.md`).
 
 ## Releases
 
