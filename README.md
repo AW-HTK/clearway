@@ -1,21 +1,33 @@
-<p align="center"><strong>English</strong> · <a href="README.fr.md">Français</a></p>
+<p align="center">
+  <img src="assets/readme/logo.svg" width="64" height="64" alt="">
+</p>
+
+<h1 align="center">Clearway</h1>
 
 <p align="center">
-  <img src="assets/readme/banner.svg" alt="Clearway: heavy tasks take turns, your machine stays usable" width="100%">
+  <strong>Heavy tasks take turns. Your machine stays usable.</strong><br>
+  A shared queue for AI coding sessions on Windows and WSL.
 </p>
 
 <p align="center">
-  <a href="https://github.com/AW-HTK/clearway/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/AW-HTK/clearway?color=16a35a"></a>
+  <a href="https://github.com/AW-HTK/clearway/releases/latest"><strong>Download for Windows</strong></a>
+  &nbsp;·&nbsp; <a href="#install">Install</a>
+  &nbsp;·&nbsp; <a href="CONTRIBUTING.md">Contribute</a>
+  &nbsp;·&nbsp; <a href="README.fr.md">Français</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/AW-HTK/clearway/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/AW-HTK/clearway?style=flat&amp;label=release&amp;color=127a41"></a>
   <a href="https://github.com/AW-HTK/clearway/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/AW-HTK/clearway/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Windows + WSL" src="https://img.shields.io/badge/platform-Windows%20%2B%20WSL-0b63c4">
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-0b63c4"></a>
 </p>
+
+---
 
 Several AI coding sessions on one PC each start a build, a test suite or a local model at the same moment, and the
 machine freezes. **Clearway** is a small queue that lives next to the clock: before a heavy task, a session asks for a
 slot, waits for its turn, runs the task, then releases the slot. A guard refuses heavy commands started without a slot.
 
-## How it works
+## One queue, across sessions
 
 | 1 · Ask | 2 · Hold | 3 · Cleared |
 | --- | --- | --- |
@@ -56,7 +68,7 @@ Builds, test suites, type checks, renders, Docker builds and local models count 
 If Clearway does not answer within 2 seconds, the guard lets the command through: it never locks a session out.
 `CLEARWAY_HOOK=off` turns it off.
 
-## Updates you can trust
+## Signed updates, on your terms
 
 Nothing updates by itself. The tray menu has **Check for updates** (or set `update.check = "daily"` in
 `config.toml`). Clearway downloads `clearway-setup.exe`, checks that `SHA256SUMS` is signed with the maintainer's

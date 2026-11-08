@@ -2,6 +2,7 @@
 //!   keygen        prints a new secret seed on stdout, to pipe straight into a secrets manager
 //!   public        prints the public key of CLEARWAY_RELEASE_SIGNING_KEY
 //!   sign <file>   writes <file>.sig (hex Ed25519 signature of the file)
+//!   verify <file> checks <file>.sig against Clearway's embedded public key (no secret needed)
 
 use ed25519_compact::{KeyPair, Seed};
 
@@ -32,8 +33,17 @@ fn main() {
             let signature = key_pair().sk.sign(&data, None);
             std::fs::write(format!("{file}.sig"), hex(signature.as_ref()) + "\n").unwrap();
         }
+        ["verify", file] => {
+            let data = std::fs::read(file).expect("file unreadable");
+            let signature = std::fs::read_to_string(format!("{file}.sig")).expect("signature unreadable");
+            if !clearway::update::signed_by(clearway::update::RELEASE_PUBLIC_KEY, &data, &signature) {
+                eprintln!("release signature does not match Clearway's public key");
+                std::process::exit(1);
+            }
+            println!("Release signature verified against Clearway's public key.");
+        }
         _ => {
-            eprintln!("usage: sign_release keygen | public | sign <file>");
+            eprintln!("usage: sign_release keygen | public | sign <file> | verify <file>");
             std::process::exit(2);
         }
     }

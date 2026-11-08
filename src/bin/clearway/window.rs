@@ -1,43 +1,30 @@
+//! Native Clearway dashboard: ticket strips, a resource sidebar and a readable activity feed.
+//! The list boxes retain scrolling, keyboard selection and accessible text; only their drawing is customized.
 use std::cell::{Cell, RefCell};
 use std::sync::{Mutex, Once};
 
 use clearway::format::{cores, duration, gb};
-use clearway::model::{TicketState, Release, Status, ReserveView};
-use clearway::scheduler::{RESERVE_COUNT, fresh_wsl};
+use clearway::model::{Release, Status, TicketState, TicketView};
+use clearway::scheduler::fresh_wsl;
 use clearway::system::hhmm;
 use clearway::tr;
-use windows_sys::Win32::Foundation::{COLORREF, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT,
-    DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_NORMAL, FillRect, FrameRect, GetDC, GetDeviceCaps,
-    HBRUSH, HDC, HFONT, InvalidateRect, LOGPIXELSY, PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
-    TRANSPARENT,
-};
+use clearway::visual::{self as v, Canvas, Fonts, inset, rect, wide};
+use windows_sys::Win32::Foundation::{HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
     ACTCTXW, ActivateActCtx, CreateActCtxW, DeactivateActCtx, ReleaseActCtx,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
-    LVIF_PARAM, LVIF_STATE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_GETITEMW,
-    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW,
-    LVN_ITEMCHANGED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES, LVS_REPORT,
-    LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR,
+    DRAWITEMSTRUCT, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, MEASUREITEMSTRUCT, ODS_FOCUS,
+    ODS_NOFOCUSRECT, ODS_SELECTED,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_PUSHBUTTON, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, ES_AUTOVSCROLL, ES_MULTILINE,
-    ES_READONLY, GetClientRect, IDYES, IsDialogMessageW, KillTimer, MB_DEFBUTTON2,
-    MB_ICONQUESTION, MB_ICONWARNING, MB_YESNO, MSG, MessageBoxW, MoveWindow, RegisterClassW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SendMessageW,
-    SetForegroundWindow, SetTimer, SetWindowTextW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_NOTIFY, WM_PAINT, WM_PRINTCLIENT, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WM_TIMER, WM_VSCROLL, SB_BOTTOM, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
-};
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::server::{Closing, log_tail};
 use crate::ui::{self, shared};
 
-const GROUP_GAP: i32 = 10;
 const ID_LIST: usize = 100;
 const ID_CANCEL: usize = 101;
 const ID_FREE: usize = 102;
@@ -45,37 +32,21 @@ const ID_FREEZE: usize = 103;
 const ID_LOG_BUTTON: usize = 104;
 const ID_LOG: usize = 105;
 const ID_FORCE: usize = 106;
+const ID_SESSIONS: usize = 107;
 const TIMER: usize = 1;
-const LOG_LINES: usize = 20;
+const CARD_HEIGHT: i32 = 124;
+const SINGLE: u32 = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
+const WRAP: u32 = DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS;
 
-const USED_COLOR: COLORREF = 0x00b0_7a4a;
-const RESERVED_COLOR: COLORREF = 0x0030_a0f0;
-const MARGIN_COLOR: COLORREF = 0x00a8_a8e8;
-const FREE_COLOR: COLORREF = 0x00ee_eeee;
-const FRAME_COLOR: COLORREF = 0x0088_8888;
-
-fn columns() -> [(String, i32); 11] {
-    [
-        (tr!("No.", "N°"), 45),
-        ("Session".into(), 140),
-        (tr!("Directory", "Dossier"), 120),
-        (tr!("Branch / worktree", "Branche / worktree"), 190),
-        (tr!("State", "État"), 115),
-        (tr!("Side", "Côté"), 60),
-        ("RAM".into(), 60),
-        ("CPU".into(), 70),
-        (tr!("Duration", "Durée"), 60),
-        (tr!("Since", "Depuis"), 55),
-        (tr!("Reason", "Raison"), 900),
-    ]
-}
-
-fn state_label(state: TicketState) -> String {
-    match state {
-        TicketState::Waiting => tr!("waiting", "attente"),
-        TicketState::Active => tr!("active", "actif"),
-        TicketState::Orphaned => tr!("orphaned", "orphelin"),
-    }
+#[derive(Clone, Copy, Default)]
+struct Layout {
+    left: i32,
+    width: i32,
+    queue_top: i32,
+    queue_height: i32,
+    activity_top: i32,
+    side: i32,
+    side_width: i32,
 }
 
 thread_local! {
@@ -83,21 +54,30 @@ thread_local! {
     static LIST: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
     static BUTTONS: Cell<[HWND; 5]> = const { Cell::new([std::ptr::null_mut(); 5]) };
     static LOG: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
-    static FONT: Cell<HFONT> = const { Cell::new(std::ptr::null_mut()) };
+    static SESSIONS: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
+    static DETAIL: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
+    static ALERT: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
+    static FONTS: RefCell<Option<Fonts>> = const { RefCell::new(None) };
     static SCALE: Cell<f32> = const { Cell::new(1.0) };
-    static BARS: Cell<RECT> = const { Cell::new(RECT { left: 0, top: 0, right: 0, bottom: 0 }) };
     static STATUS: RefCell<Option<Status>> = const { RefCell::new(None) };
-    static LOG_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+    static LOG_LINES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static LAYOUT: Cell<Layout> = const { Cell::new(Layout { left: 0, width: 0, queue_top: 0, queue_height: 0, activity_top: 0, side: 0, side_width: 0 }) };
+    static DETAIL_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+    static LOG_DETAIL: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn state_label(state: TicketState) -> String {
+    match state {
+        TicketState::Waiting => tr!("waiting", "en attente"),
+        TicketState::Active => tr!("cleared", "en piste"),
+        TicketState::Orphaned => tr!("no signal", "sans signal"),
+    }
 }
 
 static CLASS: Once = Once::new();
 static STYLES: Once = Once::new();
 /// Styles activation context (handle, activation cookie or 0), released on the UI thread at shutdown.
 static CONTEXT: Mutex<Option<(usize, usize)>> = Mutex::new(None);
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain([0]).collect()
-}
 
 fn s(v: i32) -> i32 {
     (v as f32 * SCALE.with(Cell::get)).round() as i32
@@ -137,7 +117,9 @@ fn enable_styles() {
 
 /// Deactivates and releases the styles context; on the UI thread, after the message loop.
 pub fn release_resources() {
-    let Some((h, cookie)) = CONTEXT.lock().ok().and_then(|mut c| c.take()) else { return };
+    let Some((h, cookie)) = CONTEXT.lock().ok().and_then(|mut c| c.take()) else {
+        return;
+    };
     unsafe {
         if cookie != 0 {
             DeactivateActCtx(0, cookie);
@@ -172,7 +154,7 @@ pub fn open(visible: bool) {
             wc.lpfnWndProc = Some(procedure);
             wc.hInstance = instance;
             wc.lpszClassName = class.as_ptr();
-            wc.hbrBackground = (15 + 1) as HBRUSH;
+            wc.hbrBackground = std::ptr::null_mut();
             // Resource 1: the icon linked by build.rs; null (default icon) if the exe was built without it.
             wc.hIcon = windows_sys::Win32::UI::WindowsAndMessaging::LoadIconW(instance, 1 as _);
             wc.hCursor = windows_sys::Win32::UI::WindowsAndMessaging::LoadCursorW(
@@ -189,7 +171,11 @@ pub fn open(visible: bool) {
         let (ex, x, y) = if visible {
             (WS_EX_CONTROLPARENT, CW_USEDEFAULT, CW_USEDEFAULT)
         } else {
-            (WS_EX_CONTROLPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, -20000, -20000)
+            (
+                WS_EX_CONTROLPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                -20000,
+                -20000,
+            )
         };
         let h = CreateWindowExW(
             ex,
@@ -198,8 +184,8 @@ pub fn open(visible: bool) {
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x,
             y,
-            s(1080),
-            s(700),
+            s(1280),
+            s(860),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             instance,
@@ -224,14 +210,12 @@ pub fn close() {
     }
 }
 
-unsafe fn child(parent: HWND, ex: u32, class: &str, text: &str, style: u32, id: usize) -> HWND {
-    let c = wide(class);
-    let t = wide(text);
+unsafe fn child(parent: HWND, class: &str, name: &str, style: u32, id: usize) -> HWND {
     unsafe {
         let h = CreateWindowExW(
-            ex,
-            c.as_ptr(),
-            t.as_ptr(),
+            0,
+            wide(class).as_ptr(),
+            wide(name).as_ptr(),
             WS_CHILD | WS_VISIBLE | style,
             0,
             0,
@@ -242,59 +226,67 @@ unsafe fn child(parent: HWND, ex: u32, class: &str, text: &str, style: u32, id: 
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null(),
         );
-        SendMessageW(h, WM_SETFONT, FONT.with(Cell::get) as usize, 1);
+        FONTS.with(|f| {
+            if let Some(f) = f.borrow().as_ref() {
+                SendMessageW(h, WM_SETFONT, f.body as usize, 1);
+            }
+        });
         h
     }
 }
 
 unsafe fn create_children(h: HWND) {
+    FONTS.with(|f| *f.borrow_mut() = Some(Fonts::new(SCALE.with(Cell::get))));
     unsafe {
-        let name = wide("Segoe UI");
-        let font = CreateFontW(-s(12), 0, 0, 0, FW_NORMAL as i32, 0, 0, 0, DEFAULT_CHARSET as u32, 0, 0, CLEARTYPE_QUALITY as u32, 0, name.as_ptr());
-        FONT.with(|p| p.set(font));
-        let list = child(
-            h,
-            WS_EX_CLIENTEDGE,
-            "SysListView32",
-            "",
-            WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            ID_LIST,
-        );
-        SendMessageW(
-            list,
-            LVM_SETEXTENDEDLISTVIEWSTYLE,
-            0,
-            (LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER) as isize,
-        );
-        for (i, (title, width)) in columns().iter().enumerate() {
-            let mut t = wide(title);
-            let mut col: LVCOLUMNW = std::mem::zeroed();
-            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-            col.cx = s(*width);
-            col.pszText = t.as_mut_ptr();
-            col.iSubItem = i as i32;
-            SendMessageW(list, LVM_INSERTCOLUMNW, i, &col as *const _ as isize);
-        }
-        LIST.with(|l| l.set(list));
-        let button = |text: &str, id: usize| child(h, 0, "BUTTON", text, WS_TABSTOP | BS_PUSHBUTTON as u32, id);
+        let style =
+            WS_TABSTOP | WS_VSCROLL | (LBS_NOTIFY | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT) as u32;
+        LIST.with(|l| {
+            l.set(child(
+                h,
+                "LISTBOX",
+                &tr!("Task queue", "File des tâches"),
+                style,
+                ID_LIST,
+            ))
+        });
+        LOG.with(|l| l.set(child(h, "LISTBOX", &tr!("Activity", "Activité"), style, ID_LOG)));
+        SESSIONS.with(|l| {
+            l.set(child(
+                h,
+                "LISTBOX",
+                &tr!("Connected sessions", "Sessions reliées"),
+                style,
+                ID_SESSIONS,
+            ))
+        });
+        DETAIL.with(|l| {
+            l.set(child(
+                h,
+                "EDIT",
+                "",
+                WS_TABSTOP | WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
+                0,
+            ))
+        });
+        ALERT.with(|l| {
+            l.set(child(
+                h,
+                "EDIT",
+                "",
+                WS_TABSTOP | WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
+                0,
+            ))
+        });
+        let button = |label: &str, id| child(h, "BUTTON", label, WS_TABSTOP | BS_OWNERDRAW as u32, id);
         BUTTONS.with(|b| {
             b.set([
-                button(&tr!("Cancel request…", "Annuler la demande…"), ID_CANCEL),
-                button(&tr!("Release slot…", "Libérer le créneau…"), ID_FREE),
-                button(&tr!("Force through…", "Forcer le passage…"), ID_FORCE),
-                button(&tr!("Freeze the queue", "Geler la file"), ID_FREEZE),
-                button(&tr!("Open the log", "Ouvrir le journal"), ID_LOG_BUTTON),
+                button(&tr!("Cancel request…", "Annuler…"), ID_CANCEL),
+                button(&tr!("Release slot…", "Libérer…"), ID_FREE),
+                button(&tr!("Force through…", "Forcer…"), ID_FORCE),
+                button(&tr!("Freeze queue", "Geler la file"), ID_FREEZE),
+                button(&tr!("Journal", "Journal"), ID_LOG_BUTTON),
             ])
         });
-        let log = child(
-            h,
-            WS_EX_CLIENTEDGE,
-            "EDIT",
-            "",
-            WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
-            ID_LOG,
-        );
-        LOG.with(|j| j.set(log));
     }
 }
 
@@ -302,265 +294,664 @@ unsafe fn lay_out(h: HWND) {
     unsafe {
         let mut rc: RECT = std::mem::zeroed();
         GetClientRect(h, &mut rc);
-        let m = s(10);
-        let width = rc.right - 2 * m;
-        let list_height = ((rc.bottom - 2 * m) as f32 * 0.38).max(s(140) as f32) as i32;
-        let mut y = m;
-        MoveWindow(LIST.with(Cell::get), m, y, width, list_height, 1);
-        y += list_height + s(8);
-        let mut x = m;
-        for b in BUTTONS.with(Cell::get) {
-            MoveWindow(b, x, y, s(170), s(28), 1);
-            x += s(178);
+        let m = s(20);
+        let side_width = s(330);
+        let side = rc.right - m - side_width;
+        let width = side - 2 * m;
+        let has_alerts = STATUS.with(|st| st.borrow().as_ref().is_some_and(|st| !st.alerts.is_empty()));
+        let alert_height = if has_alerts { s(56) } else { 0 };
+        let queue_top = s(124) + alert_height;
+        let count = STATUS.with(|st| st.borrow().as_ref().map_or(1, |st| st.tickets.len().max(1))) as i32;
+        let queue_height = (count * s(CARD_HEIGHT))
+            .min((rc.bottom - s(450) - alert_height).max(s(140)))
+            .max(s(CARD_HEIGHT));
+        let actions_y = queue_top + queue_height + s(8);
+        let activity_top = actions_y + s(162);
+        LAYOUT.with(|l| {
+            l.set(Layout {
+                left: m,
+                width,
+                queue_top,
+                queue_height,
+                activity_top,
+                side,
+                side_width,
+            })
+        });
+        MoveWindow(LIST.with(Cell::get), m, queue_top, width, queue_height, 1);
+        MoveWindow(ALERT.with(Cell::get), m + s(8), s(124), width - s(16), s(46), 1);
+        ShowWindow(ALERT.with(Cell::get), if has_alerts { SW_SHOW } else { SW_HIDE });
+        let [cancel, release, force, freeze, log] = BUTTONS.with(Cell::get);
+        for (i, b) in [cancel, release, force].into_iter().enumerate() {
+            MoveWindow(b, m + i as i32 * s(140), actions_y, s(132), s(36), 1);
         }
-        y += s(28) + s(10);
-        let bars = RECT { left: m, top: y, right: m + width, bottom: y + s(22) + RESERVE_COUNT as i32 * s(26) + s(GROUP_GAP) };
-        BARS.with(|b| b.set(bars));
-        y = bars.bottom + s(8);
-        MoveWindow(LOG.with(Cell::get), m, y, width, (rc.bottom - m - y).max(s(60)), 1);
-        InvalidateRect(h, std::ptr::null(), 1);
+        MoveWindow(freeze, side + side_width - s(248), s(18), s(142), s(36), 1);
+        MoveWindow(log, side + side_width - s(98), s(18), s(98), s(36), 1);
+        MoveWindow(
+            DETAIL.with(Cell::get),
+            m + s(12),
+            actions_y + s(48),
+            width - s(24),
+            s(94),
+            1,
+        );
+        MoveWindow(
+            LOG.with(Cell::get),
+            m + s(12),
+            activity_top + s(42),
+            width - s(24),
+            (rc.bottom - activity_top - s(72)).max(s(32)),
+            1,
+        );
+        MoveWindow(
+            SESSIONS.with(Cell::get),
+            side + s(14),
+            s(580),
+            side_width - s(28),
+            (rc.bottom - s(608)).max(s(48)),
+            1,
+        );
+        InvalidateRect(h, std::ptr::null(), 0);
     }
 }
 
 fn selection() -> Option<u64> {
-    let list = LIST.with(Cell::get);
-    unsafe {
-        let index = SendMessageW(list, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
-        if index < 0 {
-            return None;
-        }
-        let mut item: LVITEMW = std::mem::zeroed();
-        item.mask = LVIF_PARAM;
-        item.iItem = index as i32;
-        SendMessageW(list, LVM_GETITEMW, 0, &mut item as *mut _ as isize);
-        Some(item.lParam as u64)
-    }
-}
-
-fn state_of(id: u64) -> Option<(TicketState, String)> {
-    STATUS.with(|st| {
-        st.borrow()
-            .as_ref()
-            .and_then(|s| s.tickets.iter().find(|t| t.id == id).map(|t| (t.state, format!("{} — {}", t.session, t.description))))
+    let index = unsafe { SendMessageW(LIST.with(Cell::get), LB_GETCURSEL, 0, 0) };
+    STATUS.with(|s| {
+        s.borrow()
+            .as_ref()?
+            .tickets
+            .get(usize::try_from(index).ok()?)
+            .map(|t| t.id)
     })
 }
 
-fn update_buttons() {
-    let [cancel, release, force, _, _] = BUTTONS.with(Cell::get);
-    let state = selection().and_then(state_of).map(|(e, _)| e);
-    unsafe {
-        EnableWindow(cancel, (state == Some(TicketState::Waiting)) as i32);
-        EnableWindow(force, (state == Some(TicketState::Waiting)) as i32);
-        EnableWindow(release, matches!(state, Some(TicketState::Active | TicketState::Orphaned)) as i32);
+fn state_of(id: u64) -> Option<(TicketState, String)> {
+    STATUS.with(|s| {
+        s.borrow()
+            .as_ref()?
+            .tickets
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| (t.state, format!("{} — {}", t.session, t.description)))
+    })
+}
+
+fn ticket_text(t: &TicketView) -> String {
+    let mut state = state_label(t.state);
+    if t.lease_overrun {
+        state += &tr!(" · overdue", " · bail dépassé");
+    }
+    if t.force {
+        state += &tr!(" · forced", " · forcé");
+    }
+    if t.manual {
+        state += &tr!(" · manual", " · manuel");
+    }
+    format!(
+        "#{} · {} · {}\r\n{} · {} · {}\r\n{} · {} · {} · {}\r\n{}",
+        t.id,
+        state,
+        t.description,
+        t.session,
+        t.project.as_deref().unwrap_or("—"),
+        t.branch.as_deref().unwrap_or("—"),
+        t.side.name(),
+        gb(t.need.ram_mb as i64),
+        cores(t.need.cpu as i64),
+        duration(t.need.duration_s),
+        t.message
+    )
+}
+
+fn detail_text(value: String) {
+    let changed = DETAIL_TEXT.with(|d| {
+        if *d.borrow() == value {
+            return false;
+        }
+        *d.borrow_mut() = value.clone();
+        true
+    });
+    if changed {
+        unsafe { SetWindowTextW(DETAIL.with(Cell::get), wide(&value).as_ptr()) };
     }
 }
 
-unsafe fn cell_text(list: HWND, line: i32, column: i32, text: &str) {
-    let mut t = wide(text);
+fn update_buttons() {
+    let chosen = selection();
+    let state = chosen.and_then(state_of).map(|(e, _)| e);
+    let [cancel, release, force, _, _] = BUTTONS.with(Cell::get);
     unsafe {
-        let mut item: LVITEMW = std::mem::zeroed();
-        item.iSubItem = column;
-        item.pszText = t.as_mut_ptr();
-        SendMessageW(list, LVM_SETITEMTEXTW, line as usize, &item as *const _ as isize);
+        EnableWindow(cancel, (state == Some(TicketState::Waiting)) as i32);
+        EnableWindow(force, (state == Some(TicketState::Waiting)) as i32);
+        EnableWindow(
+            release,
+            matches!(state, Some(TicketState::Active | TicketState::Orphaned)) as i32,
+        );
+    }
+    let value = STATUS
+        .with(|s| {
+            s.borrow()
+                .as_ref()
+                .and_then(|st| st.tickets.iter().find(|t| Some(t.id) == chosen).map(ticket_text))
+        })
+        .unwrap_or_else(|| {
+            tr!(
+                "Select a ticket to see its details and available actions.",
+                "Sélectionnez un ticket pour lire ses détails et accéder aux actions."
+            )
+        });
+    detail_text(LOG_DETAIL.with(|l| l.borrow().clone()).unwrap_or(value));
+}
+
+/// Rebuild only when the accessible strings change; preserve the selection and scroll position.
+unsafe fn replace_rows(h: HWND, rows: &[String], chosen: Option<usize>, top: usize) {
+    unsafe {
+        SendMessageW(h, WM_SETREDRAW, 0, 0);
+        SendMessageW(h, LB_RESETCONTENT, 0, 0);
+        for row in rows {
+            SendMessageW(h, LB_ADDSTRING, 0, wide(row).as_ptr() as isize);
+        }
+        if let Some(i) = chosen {
+            SendMessageW(h, LB_SETCURSEL, i, 0);
+        }
+        SendMessageW(h, LB_SETTOPINDEX, top.min(rows.len().saturating_sub(1)), 0);
+        SendMessageW(h, WM_SETREDRAW, 1, 0);
+        InvalidateRect(h, std::ptr::null(), 0);
     }
 }
 
 fn refresh(h: HWND) {
     let Some(p) = shared() else { return };
     let status = p.snapshot();
-    let lines = log_tail(&p.dir(), LOG_LINES);
-    let list = LIST.with(Cell::get);
+    let lines: Vec<_> = log_tail(&p.dir(), 100).into_iter().rev().collect();
     let chosen = selection();
+    let list = LIST.with(Cell::get);
+    let rows: Vec<_> = status.tickets.iter().map(ticket_text).collect();
+    let sessions: Vec<_> = status
+        .links
+        .iter()
+        .map(|l| format!("{} · {}", l.session, l.client))
+        .collect();
+    let (queue_changed, sessions_changed, count_changed) = STATUS.with(|s| {
+        let s = s.borrow();
+        (
+            s.as_ref()
+                .map(|s| s.tickets.iter().map(ticket_text).collect::<Vec<_>>())
+                .as_ref()
+                != Some(&rows),
+            s.as_ref()
+                .map(|s| {
+                    s.links
+                        .iter()
+                        .map(|l| format!("{} · {}", l.session, l.client))
+                        .collect::<Vec<_>>()
+                })
+                .as_ref()
+                != Some(&sessions),
+            s.as_ref().map(|s| (s.tickets.len(), s.alerts.is_empty()))
+                != Some((status.tickets.len(), status.alerts.is_empty())),
+        )
+    });
+    let old_top = unsafe { SendMessageW(list, LB_GETTOPINDEX, 0, 0).max(0) as usize };
+    let index = status.tickets.iter().position(|t| Some(t.id) == chosen).or_else(|| {
+        if chosen.is_none() && !status.tickets.is_empty() {
+            Some(0)
+        } else {
+            None
+        }
+    });
     STATUS.with(|s| *s.borrow_mut() = Some(status.clone()));
     unsafe {
-        SendMessageW(list, WM_SETREDRAW, 0, 0);
-        SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
-        for (i, t) in status.tickets.iter().enumerate() {
-            let mut number = wide(&format!("#{}", t.id));
-            let mut item: LVITEMW = std::mem::zeroed();
-            item.mask = LVIF_TEXT | LVIF_PARAM;
-            item.iItem = i as i32;
-            item.pszText = number.as_mut_ptr();
-            item.lParam = t.id as isize;
-            if chosen == Some(t.id) {
-                item.mask |= LVIF_STATE;
-                item.state = LVIS_SELECTED | LVIS_FOCUSED;
-                item.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
-            }
-            let line = SendMessageW(list, LVM_INSERTITEMW, 0, &item as *const _ as isize) as i32;
-            let since = t.granted.unwrap_or(t.created);
-            let mut state = state_label(t.state);
-            if t.lease_overrun {
-                state += &tr!(" (lease overrun)", " (bail dépassé)");
-            }
-            if t.force {
-                state += &tr!(" (forced)", " (forcé)");
-            }
-            if t.manual {
-                state += &tr!(" (manual)", " (manuel)");
-            }
-            let cells = [
-                t.session.clone(),
-                t.project.clone().unwrap_or_else(|| "—".into()),
-                t.branch.clone().unwrap_or_else(|| "—".into()),
-                state,
-                t.side.name().to_owned(),
-                gb(t.need.ram_mb as i64),
-                cores(t.need.cpu as i64),
-                duration(t.need.duration_s),
-                hhmm(since),
-                t.message.clone(),
-            ];
-            for (c, text) in cells.iter().enumerate() {
-                cell_text(list, line, c as i32 + 1, text);
-            }
+        let alerts = status.alerts.join("\r\n");
+        SetWindowTextW(ALERT.with(Cell::get), wide(&alerts).as_ptr());
+        if queue_changed {
+            replace_rows(list, &rows, index, old_top);
         }
-        SendMessageW(list, WM_SETREDRAW, 1, 0);
-        InvalidateRect(list, std::ptr::null(), 1);
-
-        let text = lines.join("\r\n");
-        let change = LOG_TEXT.with(|j| {
-            let mut j = j.borrow_mut();
-            let change = *j != text;
-            *j = text.clone();
-            change
-        });
-        if change {
+        if sessions_changed {
+            let h = SESSIONS.with(Cell::get);
+            replace_rows(
+                h,
+                &sessions,
+                None,
+                SendMessageW(h, LB_GETTOPINDEX, 0, 0).max(0) as usize,
+            );
+        }
+        let log_changed = LOG_LINES.with(|l| *l.borrow() != lines);
+        if log_changed {
             let log = LOG.with(Cell::get);
-            SetWindowTextW(log, wide(&text).as_ptr());
-            SendMessageW(log, WM_VSCROLL, SB_BOTTOM as usize, 0);
+            let top = SendMessageW(log, LB_GETTOPINDEX, 0, 0).max(0) as usize;
+            let selected = SendMessageW(log, LB_GETCURSEL, 0, 0);
+            // Track the actual row, even as new activity is prepended.
+            let (anchor, selected_text) = LOG_LINES.with(|l| {
+                (
+                    l.borrow().get(top).cloned(),
+                    usize::try_from(selected).ok().and_then(|i| l.borrow().get(i).cloned()),
+                )
+            });
+            let new_top = if top == 0 {
+                0
+            } else {
+                anchor.and_then(|a| lines.iter().position(|l| *l == a)).unwrap_or(top)
+            };
+            let new_selected = selected_text.and_then(|a| lines.iter().position(|l| *l == a));
+            LOG_LINES.with(|l| *l.borrow_mut() = lines.clone());
+            replace_rows(log, &lines, new_selected, new_top);
         }
-        let [_, _, _, freeze, _] = BUTTONS.with(Cell::get);
-        let freeze_text = if status.manual_freeze.is_some() {
-            tr!("Unfreeze the queue", "Dégeler la file")
-        } else {
-            tr!("Freeze the queue", "Geler la file")
-        };
-        SetWindowTextW(freeze, wide(&freeze_text).as_ptr());
-        let waiting = status.tickets.iter().filter(|t| t.state == TicketState::Waiting).count();
-        let active = status.tickets.len() - waiting;
-        let frozen = if status.manual_freeze.is_some() { tr!(" — QUEUE FROZEN", " — FILE GELÉE") } else { String::new() };
-        let title = tr!(
-            "Clearway — {active} active, {waiting} waiting{frozen}",
-            "Clearway — {active} actif(s), {waiting} en attente{frozen}"
+        // WM_SETREDRAW(TRUE) can restore WS_VISIBLE; apply empty-state visibility after rebuilding.
+        ShowWindow(list, if rows.is_empty() { SW_HIDE } else { SW_SHOW });
+        ShowWindow(
+            SESSIONS.with(Cell::get),
+            if sessions.is_empty() { SW_HIDE } else { SW_SHOW },
         );
-        SetWindowTextW(h, wide(&title).as_ptr());
-        let bars = BARS.with(Cell::get);
-        InvalidateRect(h, &bars, 1);
+        ShowWindow(LOG.with(Cell::get), if lines.is_empty() { SW_HIDE } else { SW_SHOW });
+        let frozen = status.manual_freeze.is_some();
+        SetWindowTextW(
+            BUTTONS.with(Cell::get)[3],
+            wide(&if frozen {
+                tr!("Resume queue", "Reprendre la file")
+            } else {
+                tr!("Freeze queue", "Geler la file")
+            })
+            .as_ptr(),
+        );
+        if count_changed {
+            lay_out(h);
+        }
+        InvalidateRect(h, std::ptr::null(), 0);
+        InvalidateRect(list, std::ptr::null(), 0);
     }
     update_buttons();
 }
 
-unsafe fn rectangle(hdc: HDC, r: &RECT, color: COLORREF) {
-    unsafe {
-        let brush = CreateSolidBrush(color);
-        FillRect(hdc, r, brush);
-        DeleteObject(brush as _);
+fn ticket_colors(t: &TicketView) -> (u32, u32) {
+    if t.state == TicketState::Orphaned {
+        (v::RED_WASH, v::RED)
+    } else if t.lease_overrun || t.state == TicketState::Waiting {
+        (v::AMBER_WASH, v::AMBER)
+    } else {
+        (v::GREEN_WASH, v::GREEN_INK)
     }
 }
 
-unsafe fn text(hdc: HDC, r: &RECT, t: &str) {
-    let mut w: Vec<u16> = t.encode_utf16().collect();
-    let mut r = *r;
-    unsafe { DrawTextW(hdc, w.as_mut_ptr(), w.len() as i32, &mut r, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS) };
-}
-
-/// (used, reserved, margin, total) of a reserve, and its caption.
-fn values(r: &ReserveView, status: &Status) -> (i64, i64, i64, i64, String) {
-    if r.key == "cpu" {
-        let load = fresh_wsl(&status.measures, status.now).map(|w| w.load1);
-        let used = load.map_or(0, |c| (c as f64).round() as i64).min(r.total);
-        let measure = load.map_or_else(|| tr!("load unknown", "charge inconnue"), |c| tr!("load {c:.1}", "charge {c:.1}"));
-        let text = tr!(
-            "{measure} · reserved {} · margin {} · free {} (of {})",
-            "{measure} · réservé {} · marge {} · libre {} (sur {})",
-            cores(r.reserve),
-            cores(r.margin),
-            r.free_text(),
-            cores(r.total)
-        );
-        return (used, r.reserve, r.margin, r.total, text);
-    }
-    if r.key == "cpu_windows" {
-        let used = (status.measures.cpu_pct as f64 * r.total as f64 / 100.0).round() as i64;
-        let text = tr!(
-            "CPU {:.0}% · reserved {} · margin {} · free {} (of {})",
-            "CPU {:.0} % · réservé {} · marge {} · libre {} (sur {})",
-            status.measures.cpu_pct,
-            cores(r.reserve),
-            cores(r.margin),
-            r.free_text(),
-            cores(r.total)
-        );
-        return (used, r.reserve, r.margin, r.total, text);
-    }
-    if r.key == "ram_wsl" && status.measures.vmmem.is_none() {
-        return (0, r.reserve, r.margin, r.total, tr!("WSL stopped", "WSL arrêté"));
-    }
-    let source = match r.key.as_str() {
-        "ram_wsl" if fresh_wsl(&status.measures, status.now).is_some() => {
-            tr!(" · from MemAvailable", " · selon MemAvailable")
-        }
-        "ram_wsl" => tr!(" · from 12 GB − vmmemWSL", " · selon 12 Go − vmmemWSL"),
-        _ => String::new(),
-    };
-    let used = (r.total - r.available).max(0);
-    let text = tr!(
-        "used {} · reserved {} · margin {} · free {} (of {}){source}",
-        "utilisé {} · réservé {} · marge {} · libre {} (sur {}){source}",
-        gb(used),
-        gb(r.reserve),
-        gb(r.margin),
-        r.free_text(),
-        gb(r.total)
+unsafe fn draw_ticket(d: &DRAWITEMSTRUCT, f: &Fonts, t: &TicketView, now: u64) {
+    let c = unsafe { Canvas::new(d.hDC) };
+    c.fill(d.rcItem, v::BACKGROUND);
+    let r = rect(
+        d.rcItem.left + s(1),
+        d.rcItem.top + s(1),
+        d.rcItem.right - d.rcItem.left - s(3),
+        s(CARD_HEIGHT - 10),
     );
-    (used, r.reserve, r.margin, r.total, text)
+    c.panel(
+        r,
+        v::PAPER,
+        if d.itemState & ODS_SELECTED != 0 {
+            v::GREEN
+        } else {
+            v::BORDER
+        },
+        s(10),
+    );
+    let (wash, ink) = ticket_colors(t);
+    let badge = rect(r.left + s(10), r.top + s(12), s(76), s(88));
+    c.panel(badge, wash, wash, s(6));
+    c.text(
+        rect(badge.left, badge.top + s(10), s(76), s(28)),
+        &format!("#{}", t.id),
+        f.strong,
+        ink,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+    );
+    c.text(
+        rect(badge.left + s(3), badge.top + s(44), s(70), s(36)),
+        &if t.lease_overrun {
+            tr!("Overdue", "Bail dépassé")
+        } else {
+            state_label(t.state)
+        },
+        f.small,
+        ink,
+        DT_CENTER | DT_WORDBREAK,
+    );
+    let x = r.left + s(100);
+    let meta_x = r.right - s(174);
+    let w = (meta_x - x - s(16)).max(0);
+    c.text(
+        rect(x, r.top + s(12), w, s(24)),
+        &t.description,
+        f.strong,
+        v::INK,
+        SINGLE,
+    );
+    c.text(
+        rect(x, r.top + s(40), w, s(20)),
+        &format!("{} · {}", t.session, t.project.as_deref().unwrap_or("—")),
+        f.small,
+        v::MUTED,
+        SINGLE,
+    );
+    c.text(
+        rect(x, r.top + s(62), w, s(18)),
+        t.branch.as_deref().unwrap_or("—"),
+        f.mono,
+        v::MUTED,
+        SINGLE,
+    );
+    c.text(rect(x, r.top + s(84), w, s(18)), &t.message, f.small, ink, SINGLE);
+    c.fill(rect(meta_x - s(10), r.top + s(14), 1, s(84)), v::BORDER);
+    c.text(
+        rect(meta_x, r.top + s(14), s(160), s(20)),
+        &format!("{} · {}", t.side.name(), gb(t.need.ram_mb as i64)),
+        f.mono,
+        v::INK,
+        SINGLE,
+    );
+    c.text(
+        rect(meta_x, r.top + s(38), s(160), s(20)),
+        &format!("{} · {}", cores(t.need.cpu as i64), duration(t.need.duration_s)),
+        f.small,
+        v::MUTED,
+        SINGLE,
+    );
+    let timing = if let Some(start) = t.granted {
+        if t.lease_overrun {
+            tr!(
+                "Overdue by {}",
+                "Dépassé de {}",
+                duration(now.saturating_sub(start.saturating_add(t.need.duration_s)))
+            )
+        } else {
+            format!("{} → {}", hhmm(start), hhmm(start.saturating_add(t.need.duration_s)))
+        }
+    } else {
+        tr!(
+            "Waiting {}",
+            "Attend depuis {}",
+            duration(now.saturating_sub(t.created))
+        )
+    };
+    c.text(
+        rect(meta_x, r.top + s(64), s(160), s(20)),
+        &timing,
+        f.small,
+        ink,
+        SINGLE,
+    );
+    if let Some(start) = t.granted {
+        let w = s(148);
+        let track = rect(meta_x, r.top + s(94), w, s(4));
+        c.fill(track, v::TRACK);
+        let used = (now.saturating_sub(start) as f64 / t.need.duration_s.max(1) as f64).clamp(0.0, 1.0);
+        c.fill(
+            rect(track.left, track.top, (w as f64 * used) as i32, s(4)),
+            if t.lease_overrun { v::AMBER } else { v::GREEN },
+        );
+    }
+    if d.itemState & ODS_FOCUS != 0 && d.itemState & ODS_NOFOCUSRECT == 0 {
+        c.focus(inset(r, s(4), s(4)));
+    }
 }
 
-unsafe fn draw_bars(hdc: HDC) {
-    let Some(status) = STATUS.with(|s| s.borrow().clone()) else { return };
-    let zone = BARS.with(Cell::get);
-    unsafe {
-        let old = SelectObject(hdc, FONT.with(Cell::get) as _);
-        SetBkMode(hdc, TRANSPARENT as i32);
-        SetTextColor(hdc, 0x0020_2020);
-        let mut x = zone.left + s(115);
-        let swatches = [
-            (tr!("used", "utilisé"), USED_COLOR),
-            (tr!("reserved", "réservé"), RESERVED_COLOR),
-            (tr!("margin", "marge"), MARGIN_COLOR),
-            (tr!("free", "libre"), FREE_COLOR),
-        ];
-        for (name, color) in swatches {
-            let square = RECT { left: x, top: zone.top + s(5), right: x + s(12), bottom: zone.top + s(17) };
-            rectangle(hdc, &square, color);
-            text(hdc, &RECT { left: x + s(16), top: zone.top, right: x + s(90), bottom: zone.top + s(22) }, &name);
-            x += s(95);
-        }
-        let bar_width = ((zone.right - zone.left - s(115)) as f32 * 0.42) as i32;
-        for (i, r) in status.reserves.iter().enumerate() {
-            // Windows reserves first, then WSL ones, a little apart.
-            let y = zone.top + s(22) + i as i32 * s(26) + if r.key.starts_with("ram_wsl") || r.key == "cpu" { s(GROUP_GAP) } else { 0 };
-            text(hdc, &RECT { left: zone.left, top: y, right: zone.left + s(110), bottom: y + s(26) }, &r.name);
-            let bar = RECT { left: zone.left + s(115), top: y + s(5), right: zone.left + s(115) + bar_width, bottom: y + s(21) };
-            rectangle(hdc, &bar, FREE_COLOR);
-            let (used, reserve, margin, total, legend) = values(r, &status);
-            let mut start = bar.left;
-            for (v, color) in [(used, USED_COLOR), (reserve, RESERVED_COLOR), (margin, MARGIN_COLOR)] {
-                let px = if total > 0 { (v.max(0) as f64 * bar_width as f64 / total as f64) as i32 } else { 0 };
-                let end = (start + px).min(bar.right);
-                if end > start {
-                    rectangle(hdc, &RECT { left: start, top: bar.top, right: end, bottom: bar.bottom }, color);
-                }
-                start = end;
-            }
-            let frame = CreateSolidBrush(FRAME_COLOR);
-            FrameRect(hdc, &bar, frame);
-            DeleteObject(frame as _);
-            text(hdc, &RECT { left: bar.right + s(10), top: y, right: zone.right, bottom: y + s(26) }, &legend);
-        }
-        SelectObject(hdc, old);
+unsafe fn draw_activity(d: &DRAWITEMSTRUCT, f: &Fonts, line: &str) {
+    let c = unsafe { Canvas::new(d.hDC) };
+    c.fill(
+        d.rcItem,
+        if d.itemState & ODS_SELECTED != 0 {
+            v::BACKGROUND
+        } else {
+            v::PAPER
+        },
+    );
+    let mut parts = line.splitn(4, ' ');
+    let _date = parts.next().unwrap_or("");
+    let time = parts.next().unwrap_or("");
+    let kind = parts.next().unwrap_or("");
+    let body = parts.next().unwrap_or(line);
+    let (label, color) = match kind {
+        "RELEASED" => (tr!("RELEASED", "LIBÉRÉ"), v::GREEN_INK),
+        "CLEARED" => (tr!("CLEARED", "EN PISTE"), v::GREEN_INK),
+        "REQUEST" => (tr!("REQUEST", "DEMANDE"), v::MUTED),
+        "WAITING" => (tr!("WAITING", "ATTENTE"), v::AMBER),
+        "ERROR" => (tr!("ERROR", "ERREUR"), v::RED),
+        _ => (kind.to_owned(), v::MUTED),
+    };
+    let r = d.rcItem;
+    c.text(rect(r.left, r.top, s(74), s(32)), time, f.mono, v::MUTED, SINGLE);
+    c.text(
+        rect(r.left + s(82), r.top, s(90), s(32)),
+        &label,
+        f.small,
+        color,
+        SINGLE,
+    );
+    c.text(
+        rect(r.left + s(180), r.top, r.right - r.left - s(180), s(32)),
+        body,
+        f.small,
+        v::INK,
+        SINGLE,
+    );
+    if d.itemState & ODS_FOCUS != 0 {
+        c.focus(inset(r, 1, 1));
     }
+}
+
+unsafe fn draw(h: HWND, dc: HDC) {
+    let c = unsafe { Canvas::new(dc) };
+    let mut rc: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(h, &mut rc) };
+    c.fill(rc, v::BACKGROUND);
+    c.fill(rect(0, 0, rc.right, s(72)), v::NAVY);
+    FONTS.with(|fonts| {
+        let fonts = fonts.borrow();
+        let Some(f) = fonts.as_ref() else { return };
+        unsafe {
+            DrawIconEx(
+                dc,
+                s(20),
+                s(20),
+                LoadIconW(GetModuleHandleW(std::ptr::null()), 1 as _),
+                s(32),
+                s(32),
+                0,
+                std::ptr::null_mut(),
+                DI_NORMAL,
+            );
+        }
+        c.text(rect(s(64), s(14), s(210), s(30)), "Clearway", f.title, v::PAPER, SINGLE);
+        c.text(
+            rect(s(66), s(44), s(260), s(18)),
+            &format!("{} · Windows / WSL", env!("CARGO_PKG_VERSION")),
+            f.small,
+            v::rgb(0xa9b8c6),
+            SINGLE,
+        );
+        let l = LAYOUT.with(Cell::get);
+        c.text(
+            rect(l.left, s(86), s(78), s(28)),
+            &tr!("Queue", "File"),
+            f.title,
+            v::INK,
+            SINGLE,
+        );
+        c.panel(
+            rect(l.left, l.activity_top, l.width, rc.bottom - l.activity_top - s(20)),
+            v::PAPER,
+            v::BORDER,
+            s(10),
+        );
+        c.text(
+            rect(l.left + s(16), l.activity_top + s(10), l.width - s(32), s(24)),
+            &tr!("Activity", "Activité"),
+            f.strong,
+            v::INK,
+            SINGLE,
+        );
+        c.panel(
+            rect(l.left, l.queue_top + l.queue_height + s(50), l.width, s(108)),
+            v::PAPER,
+            v::BORDER,
+            s(10),
+        );
+        c.panel(rect(l.side, s(88), l.side_width, s(436)), v::PAPER, v::BORDER, s(10));
+        c.text(
+            rect(l.side + s(16), s(102), l.side_width - s(32), s(24)),
+            &tr!("Resources", "Ressources"),
+            f.strong,
+            v::INK,
+            SINGLE,
+        );
+        c.panel(
+            rect(l.side, s(538), l.side_width, rc.bottom - s(558)),
+            v::PAPER,
+            v::BORDER,
+            s(10),
+        );
+        c.text(
+            rect(l.side + s(16), s(548), l.side_width - s(32), s(24)),
+            &tr!("Connected sessions", "Sessions reliées"),
+            f.strong,
+            v::INK,
+            SINGLE,
+        );
+        STATUS.with(|st| {
+            let st = st.borrow();
+            let Some(st) = st.as_ref() else { return };
+            if !st.alerts.is_empty() {
+                c.panel(rect(l.left, s(120), l.width, s(54)), v::AMBER_WASH, v::AMBER_WASH, s(8));
+            }
+            let waiting = st.tickets.iter().filter(|t| t.state == TicketState::Waiting).count();
+            let active = st.tickets.iter().filter(|t| t.state == TicketState::Active).count();
+            let summary = if st.manual_freeze.is_some() {
+                tr!(
+                    "Queue paused · {active} active · {waiting} waiting",
+                    "File gelée · {active} en piste · {waiting} en attente"
+                )
+            } else {
+                tr!(
+                    "{active} active · {waiting} waiting",
+                    "{active} en piste · {waiting} en attente"
+                )
+            };
+            c.text(
+                rect(l.left + s(86), s(88), l.width - s(86), s(26)),
+                &summary,
+                f.body,
+                if st.manual_freeze.is_some() { v::AMBER } else { v::MUTED },
+                SINGLE,
+            );
+            if st.tickets.is_empty() {
+                c.panel(
+                    rect(l.left, l.queue_top, l.width, l.queue_height - s(10)),
+                    v::PAPER,
+                    v::BORDER,
+                    s(10),
+                );
+                c.text(
+                    rect(l.left + s(24), l.queue_top + s(22), l.width - s(48), s(28)),
+                    &tr!("The queue is clear", "La file est libre"),
+                    f.strong,
+                    v::INK,
+                    SINGLE,
+                );
+                c.text(
+                    rect(l.left + s(24), l.queue_top + s(58), l.width - s(48), s(36)),
+                    &tr!(
+                        "Requests from your sessions will appear here.",
+                        "Les demandes de vos sessions apparaîtront ici."
+                    ),
+                    f.body,
+                    v::MUTED,
+                    WRAP,
+                );
+            }
+            for (i, r) in st.reserves.iter().enumerate() {
+                let y = s(146 + i as i32 * 84);
+                let x = l.side + s(16);
+                let width = l.side_width - s(32);
+                c.text(rect(x, y, width, s(20)), &r.name, f.body, v::INK, SINGLE);
+                let free = if r.key.starts_with("cpu") {
+                    cores(r.free.max(0))
+                } else {
+                    gb(r.free.max(0))
+                };
+                c.text(
+                    rect(x, y, width, s(20)),
+                    &tr!("{free} free", "{free} libres"),
+                    f.mono,
+                    v::INK,
+                    DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
+                );
+                let used = match r.key.as_str() {
+                    "cpu_windows" => (st.measures.cpu_pct as f64 * r.total as f64 / 100.0).round() as i64,
+                    "cpu" => fresh_wsl(&st.measures, st.now).map_or(0, |w| w.load1.round() as i64),
+                    _ => (r.total - r.available).max(0),
+                };
+                let bar = rect(x, y + s(28), width, s(10));
+                c.fill(bar, v::TRACK);
+                let mut start = x;
+                for (amount, color) in [
+                    (
+                        used,
+                        if r.key == "cpu" || r.key == "ram_wsl" {
+                            v::TEAL
+                        } else {
+                            v::BLUE
+                        },
+                    ),
+                    (r.reserve, v::GREEN),
+                    (r.margin, v::MARGIN),
+                ] {
+                    let pixels = (width as f64 * amount.max(0) as f64 / r.total.max(1) as f64) as i32;
+                    let end = (start + pixels).min(bar.right);
+                    c.fill(rect(start, bar.top, end - start, s(10)), color);
+                    start = end;
+                }
+                let unit = |n| if r.key.starts_with("cpu") { cores(n) } else { gb(n) };
+                let legend = if r.key == "ram_wsl" && st.measures.vmmem.is_none() {
+                    tr!("WSL stopped", "WSL arrêté")
+                } else if r.key == "cpu" && fresh_wsl(&st.measures, st.now).is_none() {
+                    tr!(
+                        "WSL load unavailable · {} reserved",
+                        "Charge WSL indisponible · {} réservés",
+                        unit(r.reserve)
+                    )
+                } else if r.estimate.is_some() {
+                    r.free_text()
+                } else {
+                    tr!(
+                        "{} used · {} reserved · margin {} · of {}",
+                        "{} utilisés · {} réservés · marge {} · sur {}",
+                        unit(used),
+                        unit(r.reserve),
+                        unit(r.margin),
+                        unit(r.total)
+                    )
+                };
+                c.text(rect(x, y + s(46), width, s(30)), &legend, f.small, v::MUTED, WRAP);
+            }
+            c.text(
+                rect(l.side + s(16), s(490), l.side_width - s(32), s(22)),
+                &tr!(
+                    "Used / reserved / margin · updated every 2 s",
+                    "Utilisé / réservé / marge · actualisé toutes les 2 s"
+                ),
+                f.small,
+                v::MUTED,
+                SINGLE,
+            );
+            if st.links.is_empty() {
+                c.text(
+                    rect(l.side + s(16), s(590), l.side_width - s(32), s(46)),
+                    &tr!("No MCP session connected.", "Aucune session MCP reliée."),
+                    f.body,
+                    v::MUTED,
+                    WRAP,
+                );
+            }
+        });
+    });
 }
 
 fn confirm(h: HWND, id: u64, release: bool) {
@@ -572,10 +963,20 @@ fn confirm(h: HWND, id: u64, release: bool) {
             "Libérer le créneau du ticket #{id} ({state}) ?\n\n{what}\n\nSa réservation disparaît : si la tâche tourne encore, la machine peut saturer."
         )
     } else {
-        tr!("Cancel request #{id}?\n\n{what}", "Annuler la demande #{id} ?\n\n{what}")
+        tr!(
+            "Cancel request #{id}?\n\n{what}",
+            "Annuler la demande #{id} ?\n\n{what}"
+        )
     };
     let title = wide("Clearway");
-    let response = unsafe { MessageBoxW(h, wide(&question).as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) };
+    let response = unsafe {
+        MessageBoxW(
+            h,
+            wide(&question).as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+        )
+    };
     if response == IDYES
         && let Some(p) = shared()
     {
@@ -586,10 +987,18 @@ fn confirm(h: HWND, id: u64, release: bool) {
 fn confirm_force(h: HWND, id: u64) {
     let Some(p) = shared() else { return };
     let Some(question) = p.force_preview(id) else { return };
-    let question = tr!("{question}\n\nThe other tickets keep their place.", "{question}\n\nLes autres tickets gardent leur place.");
+    let question = tr!(
+        "{question}\n\nThe other tickets keep their place.",
+        "{question}\n\nLes autres tickets gardent leur place."
+    );
     let title = wide(&tr!("Force through", "Forcer le passage"));
     let response = unsafe {
-        MessageBoxW(h, wide(&question).as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2)
+        MessageBoxW(
+            h,
+            wide(&question).as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
     };
     if response == IDYES
         && let Err(e) = p.force_through(id)
@@ -609,6 +1018,12 @@ unsafe extern "system" fn procedure(h: HWND, msg: u32, wparam: WPARAM, lparam: L
                 SetTimer(h, TIMER, 2000, None);
                 0
             }
+            WM_GETMINMAXINFO => {
+                let m = &mut *(lparam as *mut MINMAXINFO);
+                m.ptMinTrackSize.x = s(1080);
+                m.ptMinTrackSize.y = s(760);
+                0
+            }
             WM_SIZE => {
                 if !LIST.with(Cell::get).is_null() {
                     lay_out(h);
@@ -619,32 +1034,137 @@ unsafe extern "system" fn procedure(h: HWND, msg: u32, wparam: WPARAM, lparam: L
                 refresh(h);
                 0
             }
+            WM_ERASEBKGND => 1,
             WM_PAINT => {
                 let mut ps: PAINTSTRUCT = std::mem::zeroed();
-                let hdc = BeginPaint(h, &mut ps);
-                draw_bars(hdc);
+                let dc = BeginPaint(h, &mut ps);
+                draw(h, dc);
                 EndPaint(h, &ps);
                 0
             }
             WM_PRINTCLIENT => {
-                let hdc = wparam as HDC;
-                let mut rc: RECT = std::mem::zeroed();
-                GetClientRect(h, &mut rc);
-                FillRect(hdc, &rc, (15 + 1) as HBRUSH);
-                draw_bars(hdc);
+                draw(h, wparam as HDC);
                 0
             }
-            WM_NOTIFY => {
-                if wparam == ID_LIST && lparam != 0 {
-                    let header = &*(lparam as *const NMHDR);
-                    if header.idFrom == ID_LIST && header.code == LVN_ITEMCHANGED {
-                        update_buttons();
+            WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
+                let dc = wparam as HDC;
+                let alert = lparam as HWND == ALERT.with(Cell::get);
+                SetTextColor(dc, if alert { v::AMBER } else { v::MUTED });
+                // Stock DC brush needs no allocation and is valid until Windows has painted the control.
+                let color = if alert {
+                    v::AMBER_WASH
+                } else if lparam as HWND == LIST.with(Cell::get) {
+                    v::BACKGROUND
+                } else {
+                    v::PAPER
+                };
+                SetBkColor(dc, color);
+                SetDCBrushColor(dc, color);
+                GetStockObject(DC_BRUSH) as LRESULT
+            }
+            WM_MEASUREITEM => {
+                let m = &mut *(lparam as *mut MEASUREITEMSTRUCT);
+                m.itemHeight = s(match m.CtlID as usize {
+                    ID_LIST => CARD_HEIGHT,
+                    ID_SESSIONS => 56,
+                    _ => 32,
+                }) as u32;
+                1
+            }
+            WM_DRAWITEM => {
+                let d = &*(lparam as *const DRAWITEMSTRUCT);
+                FONTS.with(|fonts| {
+                    let fonts = fonts.borrow();
+                    let Some(f) = fonts.as_ref() else { return };
+                    match d.CtlID as usize {
+                        ID_LIST => STATUS.with(|st| {
+                            if let Some(st) = st.borrow().as_ref()
+                                && let Some(t) = st.tickets.get(d.itemID as usize)
+                            {
+                                draw_ticket(d, f, t, st.now);
+                            }
+                        }),
+                        ID_LOG => LOG_LINES.with(|l| {
+                            if let Some(line) = l.borrow().get(d.itemID as usize) {
+                                draw_activity(d, f, line);
+                            }
+                        }),
+                        ID_SESSIONS => STATUS.with(|st| {
+                            if let Some(st) = st.borrow().as_ref()
+                                && let Some(link) = st.links.get(d.itemID as usize)
+                            {
+                                let c = Canvas::new(d.hDC);
+                                c.fill(d.rcItem, v::PAPER);
+                                c.text(
+                                    rect(d.rcItem.left, d.rcItem.top, d.rcItem.right - d.rcItem.left, s(26)),
+                                    &link.session,
+                                    f.body,
+                                    v::INK,
+                                    SINGLE,
+                                );
+                                let old = link.client.split_whitespace().last().is_some_and(|version| {
+                                    clearway::update::parse_version(version).is_some() && version != st.version
+                                });
+                                let client = if old {
+                                    tr!("{} · restart", "{} · à relancer", link.client)
+                                } else {
+                                    link.client.clone()
+                                };
+                                c.text(
+                                    rect(
+                                        d.rcItem.left,
+                                        d.rcItem.top + s(26),
+                                        d.rcItem.right - d.rcItem.left,
+                                        s(24),
+                                    ),
+                                    &client,
+                                    f.mono,
+                                    if old { v::AMBER } else { v::GREEN_INK },
+                                    SINGLE,
+                                );
+                                if d.itemState & ODS_FOCUS != 0 {
+                                    c.focus(inset(d.rcItem, 1, 1));
+                                }
+                            }
+                        }),
+                        _ => v::button(
+                            d,
+                            f.body,
+                            SCALE.with(Cell::get),
+                            d.CtlID as usize == ID_FREE,
+                            if matches!(d.CtlID as usize, ID_FREEZE | ID_LOG_BUTTON) {
+                                v::NAVY
+                            } else {
+                                v::BACKGROUND
+                            },
+                        ),
                     }
-                }
-                0
+                });
+                1
             }
             WM_COMMAND => {
-                match wparam & 0xffff {
+                let id = wparam & 0xffff;
+                let notification = (wparam >> 16) & 0xffff;
+                if id == ID_LIST && notification == LBN_SELCHANGE as usize {
+                    LOG_DETAIL.with(|l| *l.borrow_mut() = None);
+                    update_buttons();
+                    return 0;
+                }
+                if id == ID_LOG && notification == LBN_SELCHANGE as usize {
+                    let i = SendMessageW(LOG.with(Cell::get), LB_GETCURSEL, 0, 0);
+                    if let Some(line) =
+                        LOG_LINES.with(|l| usize::try_from(i).ok().and_then(|i| l.borrow().get(i).cloned()))
+                    {
+                        LOG_DETAIL.with(|l| *l.borrow_mut() = Some(line.clone()));
+                        detail_text(line);
+                    }
+                    return 0;
+                }
+                if notification != 0 {
+                    return 0;
+                }
+                LOG_DETAIL.with(|l| *l.borrow_mut() = None);
+                match id {
                     ID_CANCEL => {
                         if let Some(id) = selection() {
                             confirm(h, id, false);
@@ -678,14 +1198,13 @@ unsafe extern "system" fn procedure(h: HWND, msg: u32, wparam: WPARAM, lparam: L
             }
             WM_DESTROY => {
                 KillTimer(h, TIMER);
-                let font = FONT.with(|p| p.replace(std::ptr::null_mut()));
-                if !font.is_null() {
-                    DeleteObject(font as _);
-                }
                 MAIN.with(|p| p.set(std::ptr::null_mut()));
-                LIST.with(|l| l.set(std::ptr::null_mut()));
+                LIST.with(|p| p.set(std::ptr::null_mut()));
+                FONTS.with(|f| *f.borrow_mut() = None);
                 STATUS.with(|s| *s.borrow_mut() = None);
-                LOG_TEXT.with(|j| *j.borrow_mut() = String::new());
+                LOG_LINES.with(|l| l.borrow_mut().clear());
+                DETAIL_TEXT.with(|l| l.borrow_mut().clear());
+                LOG_DETAIL.with(|l| *l.borrow_mut() = None);
                 0
             }
             _ => DefWindowProcW(h, msg, wparam, lparam),

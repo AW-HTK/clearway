@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Setup Clearway, mise à jour</title>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#0b63c4}a:hover{color:#084d99}
+button,input{font-family:inherit}
+</style>
+</helmet>
+<div style="width: 760px; height: 600px; background: #ffffff; font-family: Inter, system-ui, sans-serif; color: #17202b; display: flex; flex-direction: column; box-sizing: border-box; border-radius: 10px; overflow: hidden; border: 1px solid #c9d2db">
+  <div style="background: #0d1722; color: #e8eef4; padding: 24px 32px; display: flex; align-items: center; gap: 16px">
+    <svg width="48" height="48" viewBox="0 0 64 64" fill="none" stroke="#2eaa5a" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M43.531 50.453A21.76 21.76 0 1 1 43.531 13.547" stroke-width="10.24"></path><path d="M33.088 23.68L41.408 32L33.088 40.32" stroke-width="7.68"></path></svg>
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <span style="font-size: 22px; font-weight: 700">Clearway</span>
+      <span style="font-size: 13px; color: #a9b8c6">Installation</span>
+    </div>
+    <div style="margin-left: auto; display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 13px">
+      <span style="background: #1c2d3e; color: #c5d1dc; border-radius: 6px; padding: 5px 10px">0.1.5</span>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6fd39b" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+      <span style="background: #16a35a; color: #ffffff; border-radius: 6px; padding: 5px 10px; font-weight: 600">0.1.6</span>
+    </div>
+  </div>
+  <div style="flex: 1; padding: 28px 32px; display: flex; flex-direction: column; gap: 18px">
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <h1 style="margin: 0; font-size: 22px; font-weight: 700">Une nouvelle version est prête</h1>
+      <p style="margin: 0; font-size: 14px; line-height: 1.5; color: #4d5967">Clearway 0.1.5 est installé. Rien n'est modifié avant la page suivante.</p>
+    </div>
+    <label style="display: flex; gap: 14px; align-items: flex-start; border: 2px solid #16a35a; background: #f2faf5; border-radius: 10px; padding: 16px 18px; cursor: pointer">
+      <input type="radio" name="choix" checked="checked" style="margin: 3px 0 0; width: 18px; height: 18px; accent-color: #16a35a">
+      <span style="display: flex; flex-direction: column; gap: 4px">
+        <span style="font-size: 15px; font-weight: 600">Mettre à jour vers la 0.1.6</span>
+        <span style="font-size: 13px; line-height: 1.5; color: #3a4757">Remplace la 0.1.5 sur place. Réglages et journal gardés ; les sessions ouvertes patientent pendant le changement.</span>
+      </span>
+    </label>
+    <label style="display: flex; gap: 14px; align-items: flex-start; border: 1px solid #d6dde4; border-radius: 10px; padding: 16px 18px; cursor: pointer">
+      <input type="radio" name="choix" style="margin: 3px 0 0; width: 18px; height: 18px; accent-color: #16a35a">
+      <span style="display: flex; flex-direction: column; gap: 4px">
+        <span style="font-size: 15px; font-weight: 600">Désinstaller</span>
+        <span style="font-size: 13px; line-height: 1.5; color: #3a4757">Retire Clearway de Windows, de WSL, de Claude Code et de Codex.</span>
+      </span>
+    </label>
+    <div style="background: #f4f6f8; border-radius: 10px; padding: 14px 18px; display: flex; flex-direction: column; gap: 8px">
+      <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.04em; color: #3a4757">NOUVEAUTÉS</span>
+      <span style="font-size: 13px; line-height: 1.5">RAM Windows comptée au plus juste pour les tâches WSL · Codex guidé vers les outils MCP · typecheck reconnu lourd</span>
+    </div>
+  </div>
+  <div style="padding: 16px 32px 24px; display: flex; align-items: center; gap: 10px; border-top: 1px solid #e3e9ee">
+    <span style="font-size: 12px; color: #4d5967; display: flex; align-items: center; gap: 6px">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#116236" stroke-width="2.2" aria-hidden="true"><path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6z"></path><path d="M9 12l2 2 4-4"></path></svg>
+      Signature Ed25519 vérifiée
+    </span>
+    <button type="button" style="margin-left: auto; height: 40px; padding: 0 18px; border-radius: 8px; border: 1px solid #c3ccd5; background: #ffffff; font-size: 14px; color: #17202b">Annuler</button>
+    <button type="button" style="height: 40px; padding: 0 20px; border-radius: 8px; border: 0; background: #127a41; font-size: 14px; font-weight: 600; color: #ffffff">Continuer</button>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":760,"height":600}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

@@ -1,22 +1,34 @@
-<p align="center"><a href="README.md">English</a> · <strong>Français</strong></p>
+<p align="center">
+  <img src="assets/readme/logo.svg" width="64" height="64" alt="">
+</p>
+
+<h1 align="center">Clearway</h1>
 
 <p align="center">
-  <img src="assets/readme/banner.fr.svg" alt="Clearway : les tâches lourdes passent chacune à son tour, la machine reste utilisable" width="100%">
+  <strong>Les tâches lourdes passent chacune à leur tour. La machine reste utilisable.</strong><br>
+  Une file commune aux sessions de programmation assistée par IA, sur Windows et WSL.
 </p>
 
 <p align="center">
-  <a href="https://github.com/AW-HTK/clearway/releases/latest"><img alt="Version" src="https://img.shields.io/github/v/release/AW-HTK/clearway?color=16a35a"></a>
+  <a href="https://github.com/AW-HTK/clearway/releases/latest"><strong>Télécharger pour Windows</strong></a>
+  &nbsp;·&nbsp; <a href="#installation">Installation</a>
+  &nbsp;·&nbsp; <a href="CONTRIBUTING.fr.md">Contribuer</a>
+  &nbsp;·&nbsp; <a href="README.md">English</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/AW-HTK/clearway/releases/latest"><img alt="Version" src="https://img.shields.io/github/v/release/AW-HTK/clearway?style=flat&amp;label=version&amp;color=127a41"></a>
   <a href="https://github.com/AW-HTK/clearway/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/AW-HTK/clearway/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Windows + WSL" src="https://img.shields.io/badge/plateforme-Windows%20%2B%20WSL-0b63c4">
-  <a href="LICENSE"><img alt="Licence MIT" src="https://img.shields.io/badge/licence-MIT-0b63c4"></a>
 </p>
+
+---
 
 Plusieurs sessions de programmation assistée par IA sur un même PC lancent chacune un build, une suite de tests ou
 un modèle local au même moment, et la machine se fige. **Clearway** est une petite file d'attente qui vit à côté de
 l'horloge : avant une tâche lourde, la session demande un créneau, attend son tour, lance sa tâche, puis libère le
 créneau. Une garde refuse les commandes lourdes lancées sans créneau.
 
-## Comment ça marche
+## Une file commune aux sessions
 
 | 1 · Demander | 2 · Attendre | 3 · En piste |
 | --- | --- | --- |
@@ -58,7 +70,7 @@ Les builds, suites de tests, vérifications de types, rendus, builds Docker et m
 reste passe librement. Si Clearway ne répond pas en 2 secondes, la garde laisse passer la commande : elle ne bloque
 jamais une session. `CLEARWAY_HOOK=off` la désactive.
 
-## Des mises à jour de confiance
+## Des mises à jour signées, à votre initiative
 
 Rien ne se met à jour tout seul. Le menu de l'icône propose **Chercher les mises à jour** (ou `update.check = "daily"`
 dans `config.toml`). Clearway télécharge `clearway-setup.exe`, vérifie que `SHA256SUMS` est signé par la clé Ed25519 du

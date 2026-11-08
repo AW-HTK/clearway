@@ -1,6 +1,6 @@
 {
   "name": "clearway",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Waits for a free slot of RAM and CPU before heavy tasks, so parallel AI sessions do not freeze the machine.",
   "author": {
     "name": "AW-HTK"
