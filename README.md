@@ -1,3 +1,5 @@
+<p align="center"><strong>English</strong> · <a href="README.fr.md">Français</a></p>
+
 <p align="center">
   <img src="assets/readme/banner.svg" alt="Clearway: heavy tasks take turns, your machine stays usable" width="100%">
 </p>
