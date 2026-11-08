@@ -1,6 +1,8 @@
-# Contributing to Clearway
+<p align="center"><img src="assets/readme/logo.svg" alt="" width="72"></p>
 
-Contributions are welcome: bug reports, ideas and pull requests.
+<h1 align="center">Contributing to Clearway</h1>
+
+<p align="center">Bug reports, ideas and pull requests are welcome.</p>
 
 ## Before you start
 
