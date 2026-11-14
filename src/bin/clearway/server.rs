@@ -80,6 +80,7 @@ pub struct Server {
     announcements: Vec<Announcement>,
     balloons: Balloons,
     swap_history: VecDeque<(u64, u64)>,
+    cpu_history: VecDeque<(u64, u64, u64)>,
     error_persistence: bool,
     links: BTreeMap<u64, LiveLink>,
     link_counter: u64,
@@ -119,6 +120,19 @@ pub fn swap_out_rate_of(history: &mut VecDeque<(u64, u64)>, now: u64, pswpout: u
     let (t0, p0) = history[0];
     let duration = now.saturating_sub(t0);
     if duration == 0 { 0.0 } else { pswpout.saturating_sub(p0) as f32 / duration as f32 }
+}
+
+/// WSL cores busy over ~30 s, from the cumulative /proc/stat readings (time, busy, total).
+pub fn busy_cores_of(history: &mut VecDeque<(u64, u64, u64)>, now: u64, w: &WslMeasures) -> Option<f32> {
+    if history.back().is_some_and(|&(_, b, j)| b > w.cpu_busy || j > w.cpu_jiffies) {
+        history.clear();
+    }
+    history.push_back((now, w.cpu_busy, w.cpu_jiffies));
+    while history.len() > 2 && history[1].0 + SWAP_WINDOW_S <= now {
+        history.pop_front();
+    }
+    let ((_, b0, j0), (_, b1, j1)) = (history[0], history[history.len() - 1]);
+    (j1 > j0).then(|| (b1 - b0) as f32 / (j1 - j0) as f32 * w.cpus as f32)
 }
 
 pub fn log_line(dir: &Path, text: &str) {
@@ -278,6 +292,7 @@ impl Server {
             announcements,
             balloons: Balloons::default(),
             swap_history: VecDeque::new(),
+            cpu_history: VecDeque::new(),
             error_persistence: false,
             links: BTreeMap::new(),
             link_counter: 0,
@@ -324,6 +339,13 @@ impl Server {
     fn update_wsl(&mut self, w: Option<WslMeasures>, now: u64) {
         if let Some(mut w) = w {
             w.at = now;
+            // A client too old to read /proc/stat keeps a recent reading rather than falling back to the load.
+            w.busy_cores = if w.cpu_jiffies == 0 || w.cpus == 0 {
+                let recent = self.cpu_history.back().is_some_and(|&(t, _, _)| now.saturating_sub(t) <= SWAP_WINDOW_S);
+                self.measures.wsl.and_then(|p| p.busy_cores).filter(|_| recent)
+            } else {
+                busy_cores_of(&mut self.cpu_history, now, &w)
+            };
             self.measures.wsl = Some(w);
             self.measures.swap_out_ps = swap_out_rate_of(&mut self.swap_history, now, w.pswpout);
         }
@@ -640,6 +662,10 @@ fn wsl_since_params(req: &Request) -> Option<WslMeasures> {
         swap_free_mb: req.param("swap_free_mb").and_then(|v| v.parse().ok()).unwrap_or(0),
         pswpin: req.param("pswpin").and_then(|v| v.parse().ok()).unwrap_or(0),
         pswpout: req.param("pswpout").and_then(|v| v.parse().ok()).unwrap_or(0),
+        cpu_busy: req.param("cpu_busy").and_then(|v| v.parse().ok()).unwrap_or(0),
+        cpu_jiffies: req.param("cpu_jiffies").and_then(|v| v.parse().ok()).unwrap_or(0),
+        cpus: req.param("cpus").and_then(|v| v.parse().ok()).unwrap_or(0),
+        busy_cores: None,
         at: 0,
     })
 }
@@ -1398,6 +1424,34 @@ mod tests {
             }
         }
         assert_eq!(balloons, vec![120, 120 + 1800]);
+    }
+
+    #[test]
+    fn busy_cores_ignore_io_wait() {
+        let stat = "cpu  600 0 200 1000 9000 0 0 0 0 0\ncpu0 300 0 100 500 4500 0 0 0 0 0\ncpu1 300 0 100 500 4500 0 0 0 0 0\nintr 1\n";
+        assert_eq!(clearway::model::cpu_counters(stat), Some((800, 10_800, 2)));
+        assert_eq!(clearway::model::cpu_counters("intr 1\n"), None);
+        let reading = |busy, jiffies| WslMeasures {
+            mem_avail_mb: 0,
+            mem_total_mb: 0,
+            load1: 9.0,
+            swap_total_mb: 0,
+            swap_free_mb: 0,
+            pswpin: 0,
+            pswpout: 0,
+            cpu_busy: busy,
+            cpu_jiffies: jiffies,
+            cpus: 10,
+            busy_cores: None,
+            at: 0,
+        };
+        let mut h = VecDeque::new();
+        assert_eq!(busy_cores_of(&mut h, T, &reading(1000, 10_000)), None, "one reading is no rate");
+        // 1000 jiffies in 10 s on 10 cores, 250 busy: 2.5 cores, whatever the I/O wait in the rest.
+        assert_eq!(busy_cores_of(&mut h, T + 10, &reading(1250, 11_000)), Some(2.5));
+        // Counters reset (WSL restarted): no negative value, a fresh window.
+        assert_eq!(busy_cores_of(&mut h, T + 20, &reading(10, 100)), None);
+        assert_eq!(busy_cores_of(&mut h, T + 30, &reading(910, 1100)), Some(9.0));
     }
 
     #[test]

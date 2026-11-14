@@ -179,8 +179,30 @@ pub struct WslMeasures {
     pub pswpin: u64,
     #[serde(default)]
     pub pswpout: u64,
+    /// Cumulative jiffies of the aggregate /proc/stat `cpu` line: busy (I/O wait excluded) and total.
+    #[serde(default)]
+    pub cpu_busy: u64,
+    #[serde(default)]
+    pub cpu_jiffies: u64,
+    #[serde(default)]
+    pub cpus: u32,
+    /// Cores busy over ~30 s, computed by the server from the counters; `None` until two readings.
+    #[serde(default)]
+    pub busy_cores: Option<f32>,
     #[serde(default)]
     pub at: u64,
+}
+
+/// (busy, total, cpus) from /proc/stat; I/O wait counts as idle, unlike the load average.
+pub fn cpu_counters(stat: &str) -> Option<(u64, u64, u32)> {
+    let mut lines = stat.lines();
+    let v: Vec<u64> = lines.next()?.strip_prefix("cpu ")?.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    let [user, nice, system, idle, iowait, irq, softirq, steal, ..] = v[..] else {
+        return None;
+    };
+    let cpus = lines.filter(|l| l.strip_prefix("cpu").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))).count();
+    let busy = user + nice + system + irq + softirq + steal;
+    Some((busy, busy + idle + iowait, cpus as u32))
 }
 
 impl WslMeasures {

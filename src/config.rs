@@ -266,8 +266,9 @@ swap.threshold = {threshold}
 swap.release_threshold = {release}
 swap.out_rate = {out_rate}
 
-# Measured CPU (WSL: 1-min load average over cpu.total; Windows: CPU usage): at or above cpu.pressure (%) for
-# cpu.pressure_delay, no new ticket takes cores on that side; lifted under cpu.pressure_release for as long.
+# Measured CPU (WSL: cores busy over 30 s, I/O wait excluded, over cpu.total; Windows: CPU usage): at or above
+# cpu.pressure (%) for cpu.pressure_delay, no new ticket takes cores on that side; lifted under cpu.pressure_release
+# for as long.
 cpu.pressure = {cpu_pressure}
 cpu.pressure_release = {cpu_release}
 cpu.pressure_delay = "{cpu_delay}"

@@ -27,6 +27,10 @@ fn measures(ram_windows_avail_gb: f64, wsl_avail_gb: f64, vmmem_gb: f64) -> Meas
             swap_free_mb: 4096,
             pswpin: 0,
             pswpout: 0,
+            cpu_busy: 0,
+            cpu_jiffies: 0,
+            cpus: 0,
+            busy_cores: None,
             at: H,
         }),
     }
@@ -1049,6 +1053,40 @@ fn measured_cpu_pressure_freezes_only_that_side() {
         e = p.state;
     }
     assert!(lifted && !e.cpu_pressure.wsl.on);
+}
+
+#[test]
+fn busy_cores_win_over_an_io_wait_load() {
+    let c = config();
+    let measured = |load1: f32, busy: Option<f32>, at: u64| {
+        let mut m = fresh(large(), at);
+        if let Some(w) = &mut m.wsl {
+            w.load1 = load1;
+            w.busy_cores = busy;
+        }
+        m
+    };
+    // Load 9.3 from git blocked on a /mnt drive, 2.4 cores really busy: no pressure, the ticket goes.
+    let mut e = state(vec![]);
+    for k in 0..=6 {
+        let at = H + k * 10;
+        e = schedule(&e, &measured(9.3, Some(2.4), at), &c, at).state;
+    }
+    assert!(!e.cpu_pressure.wsl.on);
+    assert_eq!(reserve_views(&e, &measured(9.3, Some(2.4), H + 60), &c, H + 60)[3].used_pct, Some(24));
+    // Really busy: frozen, and the cause gives the measured share instead of the load.
+    let mut e = state(vec![]);
+    for k in 0..=6 {
+        let at = H + k * 10;
+        e = schedule(&e, &measured(9.3, Some(9.6), at), &c, at).state;
+    }
+    assert!(e.cpu_pressure.wsl.on);
+    let mut t = ticket(1, Side::Wsl, 1.0, 2, 10);
+    t.presence = H + 70;
+    e.tickets = vec![t];
+    let p = schedule(&e, &measured(9.3, Some(9.6), H + 70), &c, H + 70);
+    let message = &p.reasons[&1].message;
+    assert!(message.contains("CPU WSL saturé (96 %) depuis 1 min"), "{message}");
 }
 
 #[test]

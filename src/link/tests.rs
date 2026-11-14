@@ -89,6 +89,10 @@ impl Connector for Pipes {
             swap_free_mb: 0,
             pswpin: 0,
             pswpout: 0,
+            cpu_busy: 0,
+            cpu_jiffies: 0,
+            cpus: 0,
+            busy_cores: None,
             at: 0,
         })
     }

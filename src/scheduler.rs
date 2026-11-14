@@ -24,7 +24,8 @@ pub fn calm_swap(e: &State, m: &Measures, c: &Config, now: u64) -> Option<String
 /// Measured use of a CPU reserve in percent of its budget; `None` without a fresh measure.
 pub fn cpu_used_pct(r: Reserve, m: &Measures, c: &Config, now: u64) -> Option<f64> {
     match r {
-        Reserve::Cpu => fresh_wsl(m, now).map(|w| w.load1 as f64 * 100.0 / c.cpu_total.max(1) as f64),
+        // The load average also counts tasks blocked on I/O (git on a /mnt drive): measured busy cores win.
+        Reserve::Cpu => fresh_wsl(m, now).map(|w| w.busy_cores.unwrap_or(w.load1) as f64 * 100.0 / c.cpu_total.max(1) as f64),
         Reserve::CpuWindows => (m.cpu_pct > 0.0 || m.windows_cores > 0).then_some(m.cpu_pct as f64),
         _ => None,
     }
@@ -708,7 +709,7 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
             continue;
         }
         let used = cpu_used_pct(r, m, c, now).unwrap_or(0.0);
-        let measured = if r == Reserve::Cpu {
+        let measured = if r == Reserve::Cpu && fresh_wsl(m, now).is_some_and(|w| w.busy_cores.is_none()) {
             let load = format!("{:.1}", fresh_wsl(m, now).map_or(0.0, |w| w.load1));
             let load = if crate::i18n::current() == crate::i18n::Lang::Fr { load.replace('.', ",") } else { load };
             tr!("load {load} / {}", "load {load} / {}", cores(c.cpu_total as i64))
