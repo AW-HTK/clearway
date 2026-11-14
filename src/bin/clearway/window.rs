@@ -885,7 +885,7 @@ unsafe fn draw(h: HWND, dc: HDC) {
                 );
                 let used = match r.key.as_str() {
                     "cpu_windows" => (st.measures.cpu_pct as f64 * r.total as f64 / 100.0).round() as i64,
-                    "cpu" => fresh_wsl(&st.measures, st.now).map_or(0, |w| w.load1.round() as i64),
+                    "cpu" => fresh_wsl(&st.measures, st.now).map_or(0, |w| w.busy_cores.unwrap_or(w.load1).round() as i64),
                     _ => (r.total - r.available).max(0),
                 };
                 let bar = rect(x, y + s(28), width, s(10));

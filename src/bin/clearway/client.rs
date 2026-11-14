@@ -557,6 +557,8 @@ pub(crate) fn measures_wsl() -> Option<WslMeasures> {
             .map(|kb| kb / 1024)
     };
     let load1 = std::fs::read_to_string("/proc/loadavg").ok()?.split_whitespace().next()?.parse().ok()?;
+    let (cpu_busy, cpu_jiffies, cpus) =
+        std::fs::read_to_string("/proc/stat").ok().as_deref().and_then(clearway::model::cpu_counters).unwrap_or_default();
     Some(WslMeasures {
         mem_avail_mb: field("MemAvailable:")?,
         mem_total_mb: field("MemTotal:")?,
@@ -565,6 +567,10 @@ pub(crate) fn measures_wsl() -> Option<WslMeasures> {
         swap_free_mb: field("SwapFree:").unwrap_or(0),
         pswpin: vmstat("pswpin"),
         pswpout: vmstat("pswpout"),
+        cpu_busy,
+        cpu_jiffies,
+        cpus,
+        busy_cores: None,
         at: 0,
     })
 }
@@ -578,6 +584,9 @@ fn add_measures(req: &mut Request) {
         req.params.insert("swap_free_mb".into(), m.swap_free_mb.to_string());
         req.params.insert("pswpin".into(), m.pswpin.to_string());
         req.params.insert("pswpout".into(), m.pswpout.to_string());
+        req.params.insert("cpu_busy".into(), m.cpu_busy.to_string());
+        req.params.insert("cpu_jiffies".into(), m.cpu_jiffies.to_string());
+        req.params.insert("cpus".into(), m.cpus.to_string());
     }
 }
 
@@ -1120,12 +1129,13 @@ fn status_view() -> Result<i32, String> {
         (Some(v), Some(w)) => println!(
             "{}",
             tr!(
-                "WSL: vmmemWSL {} · MemAvailable {} of {} · load {:.2} (measured {} s ago)",
-                "WSL : vmmemWSL {} · MemAvailable {} sur {} · charge {:.2} (mesure d'il y a {} s)",
+                "WSL: vmmemWSL {} · MemAvailable {} of {} · load {:.2}{} (measured {} s ago)",
+                "WSL : vmmemWSL {} · MemAvailable {} sur {} · charge {:.2}{} (mesure d'il y a {} s)",
                 gb(v.rss_mb as i64),
                 gb(w.mem_avail_mb as i64),
                 gb(w.mem_total_mb as i64),
                 w.load1,
+                w.busy_cores.map(|b| tr!(" · {b:.1} cores busy", " · {b:.1} cœurs occupés")).unwrap_or_default(),
                 s.now.saturating_sub(w.at)
             )
         ),
