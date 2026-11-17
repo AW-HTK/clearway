@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use clearway::format::{cores, duration, gb, parse_duration, parse_ram};
-use clearway::model::{Side, TicketRequest, Release, WslMeasures, Presence, Extension, Status, View};
+use clearway::model::{Side, TicketRequest, Release, WslMeasures, Presence, Extension, Resize, Status, View};
 use clearway::protocol::{RELAY_ABSENT, Response, Request, DEFAULT_PIPE};
 use clearway::system::{random, hex, hhmm};
 use clearway::tr;
@@ -51,6 +51,8 @@ clearway: queue for heavy tasks, served by clearway.exe (Windows) through its re
       creates a manual ticket and prints its number; the declared duration is its lease
   clearway wait <ticket> [--max 9m]       waits for clearance in the foreground, printing each change
   clearway extend <ticket> <duration> \"<reason>\"   extends the duration of an active ticket
+  clearway resize <ticket> [--ram 1G] [--cpu 1] [--duration 20m] [\"<reason>\"]
+      lowers the estimate of a waiting or active ticket, never raises it
   clearway release <ticket> [--code N]    releases the slot
   clearway cancel <ticket>                withdraws the request or releases the slot
   clearway status                         queue, reserves and measures
@@ -71,6 +73,8 @@ clearway : file des tâches lourdes, servie par clearway.exe (Windows) à traver
       crée un ticket manuel et affiche son numéro ; la durée déclarée sert de bail
   clearway wait <ticket> [--max 9m]       attend le feu vert au premier plan, en écrivant chaque changement
   clearway extend <ticket> <durée> \"<raison>\"   allonge la durée d'un ticket actif
+  clearway resize <ticket> [--ram 1G] [--cpu 1] [--duration 20m] [\"<raison>\"]
+      baisse l'estimation d'un ticket en attente ou actif, sans jamais la monter
   clearway release <ticket> [--code N]    libère le créneau
   clearway cancel <ticket>                retire la demande ou libère le créneau
   clearway status                         file, réserves et mesures
@@ -175,6 +179,7 @@ fn execute(args: &[String]) -> Result<i32, String> {
         "request" | "demande" => request_cmd(left),
         "wait" | "attend" => wait_cmd(left),
         "extend" | "prolonge" => extend_cmd(left),
+        "resize" => resize_cmd(left),
         "release" | "fin" => end(left),
         "cancel" | "annule" => cancel_cmd(number(left)?),
         "status" | "statut" => status_view(),
@@ -1059,6 +1064,42 @@ fn extend_cmd(args: &[String]) -> Result<i32, String> {
             Ok(1)
         }
         code => Err(tr!("extension of #{id} ({code}): {}", "prolongation du #{id} ({code}) : {}", message(&r.body))),
+    }
+}
+
+fn resize_cmd(args: &[String]) -> Result<i32, String> {
+    let c = cmd("resize");
+    let usage = || {
+        tr!(
+            "usage: {c} <ticket> [--ram 1G] [--cpu 1] [--duration 20m] [\"<reason>\"] (e.g. {c} 12 --cpu 1 \"Waits on the network\")",
+            "usage : {c} <ticket> [--ram 1G] [--cpu 1] [--duration 20m] [\"<raison>\"] (ex. {c} 12 --cpu 1 \"Attend le réseau\")"
+        )
+    };
+    let id = args.first().and_then(|a| a.trim_start_matches('#').parse::<u64>().ok()).ok_or_else(usage)?;
+    let o = options(&args[1..], false)?;
+    if o.ram_mb.is_none() && o.cpu.is_none() && o.duration_s.is_none() {
+        return Err(usage());
+    }
+    let body = Resize { ram_mb: o.ram_mb, cpu: o.cpu, duration_s: o.duration_s, reason: o.positionals.join(" ") };
+    let mut client = Client::new()?;
+    let r = client.request("POST", &format!("/tickets/{id}/resize"), serde_json::to_value(body).map_err(|e| e.to_string())?)?;
+    match r.code {
+        200 => {
+            println!("{}", message(&r.body));
+            Ok(0)
+        }
+        404 => {
+            eprintln!(
+                "{}",
+                tr!(
+                    "Ticket #{id} unknown or already out of the queue: {}",
+                    "Ticket #{id} inconnu ou déjà sorti de la file : {}",
+                    message(&r.body)
+                )
+            );
+            Ok(1)
+        }
+        code => Err(tr!("resize of #{id} ({code}): {}", "réduction du #{id} ({code}) : {}", message(&r.body))),
     }
 }
 

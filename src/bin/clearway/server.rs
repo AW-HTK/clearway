@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use clearway::config::Config;
 use clearway::format::{duration, gb};
 use clearway::model::{
-    Heartbeat, Need, OrphanCause, TicketRequest, Link, State, TicketState, Release, Measures, WslMeasures, Presence, Extension, Reason, Status,
+    Heartbeat, Need, OrphanCause, TicketRequest, Link, State, TicketState, Release, Measures, WslMeasures, Presence, Extension, Resize, Reason, Status,
     Ticket, DecisionKind, View, TicketView, LinkView,
 };
 use clearway::scheduler::{self, Event, FreeReason, Reserve};
@@ -879,6 +879,7 @@ pub fn handle(p: &Shared, req: &Request, ctx: &Context) -> Response {
         ("POST", ["tickets", n, "ack"]) => id(n).map_or_else(invalid, |i| acknowledge(p, i)),
         ("POST", ["tickets", n, "presence"]) => id(n).map_or_else(invalid, |i| presence(p, req, i)),
         ("POST", ["tickets", n, "extend"]) => id(n).map_or_else(invalid, |i| extend(p, req, i)),
+        ("POST", ["tickets", n, "resize"]) => id(n).map_or_else(invalid, |i| resize(p, req, i)),
         ("POST", ["tickets", n, "release"]) => id(n).map_or_else(invalid, |i| {
             let f: Release = serde_json::from_value(req.body.clone()).unwrap_or_default();
             p.close_ticket(i, &f, Closing::Release)
@@ -1191,6 +1192,46 @@ fn extend(p: &Shared, req: &Request, id: u64) -> Response {
     );
     let rep = match s.commit(candidate, true, None, Some(prelude)) {
         Ok(()) => response(200, json!({ "id": id, "state": "active", "message": message })),
+        Err(e) => error(503, &e),
+    };
+    p.publish(s);
+    rep
+}
+
+fn resize(p: &Shared, req: &Request, id: u64) -> Response {
+    let d: Resize = match serde_json::from_value(req.body.clone()) {
+        Ok(d) => d,
+        Err(e) => return error(400, &clearway::tr!("unreadable resize: {e}", "réduction illisible : {e}")),
+    };
+    let now = unix_now();
+    let mut s = p.lock();
+    let Some(t) = s.state.ticket(id).cloned() else {
+        return not_found(&s, id);
+    };
+    let need = match scheduler::lowered(&t, &d, now) {
+        Ok(n) => n,
+        Err(e) => return error(409, &e),
+    };
+    let mut candidate = s.state.clone();
+    if let Some(c) = candidate.ticket_mut(id) {
+        c.need = need;
+        c.presence = now;
+    }
+    let message = clearway::tr!(
+        "Ticket #{id} lowered to {}, {} core(s), {}.",
+        "Ticket #{id} baissé à {}, {} cœur(s), {}.",
+        gb(need.ram_mb as i64),
+        need.cpu,
+        duration(need.duration_s)
+    );
+    let prelude = format!(
+        "RESIZED #{id} {} · {message} {}",
+        ticket_summary(&t),
+        clearway::tr!("Reason: {}", "Raison : {}", d.reason)
+    );
+    let state = state_name(t.state);
+    let rep = match s.commit(candidate, true, None, Some(prelude)) {
+        Ok(()) => response(200, json!({ "id": id, "state": state, "message": message })),
         Err(e) => error(503, &e),
     };
     p.publish(s);

@@ -120,7 +120,7 @@ programs cannot start, so Codex uses the MCP tools only.
 - Relay: `clearway.exe relay [--pipe <name>]` (stdin/stdout ↔ named pipe; exit 69 if the server is absent, 74 if
   the pipe closes).
 - Client (WSL): `clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--duration 15m] [--max 9m] "description" --
-  command…`, `clearway request`, `wait`, `extend`, `release`, `cancel`, `status`. Exit codes: 0, 1 ticket out of the
+  command…`, `clearway request`, `wait`, `extend`, `resize`, `release`, `cancel`, `status`. Exit codes: 0, 1 ticket out of the
   queue, 2 error, 3 refused, 75 still waiting after `--max` or clearance taken back before the acknowledgement (rerun
   the same command to keep the place), 130 interrupted.
 - Hook: `clearway hook` / `clearway.exe hook` (PreToolUse event on stdin, refusal on stdout).
@@ -147,7 +147,7 @@ programs cannot start, so Codex uses the MCP tools only.
   `$XDG_RUNTIME_DIR/clearway-<pipe>.sock` outside Windows. One JSON request per line
   (`{"method","path","params","body"}`), one response per line (`{"code","body"}`).
 - Routes: `POST /tickets`, `GET /tickets/{n}/wait` (`known`, `timeout_s`, `ack`), `POST /tickets/{n}/presence`,
-  `/extend`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
+  `/extend`, `/resize`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
   `/link/heartbeat`.
 - Multiplexing: a request with an `"id"` runs on its own thread and its response carries the same `id`, in any order;
   without `id`, requests are served one after the other. The relay copies both ways at once (overlapped I/O on

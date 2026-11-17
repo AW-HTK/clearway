@@ -284,6 +284,19 @@ pub struct Extension {
     pub reason: String,
 }
 
+/// Lower estimate for a ticket: each value given replaces the current one, never upwards.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Resize {
+    #[serde(default)]
+    pub ram_mb: Option<u64>,
+    #[serde(default)]
+    pub cpu: Option<u32>,
+    #[serde(default)]
+    pub duration_s: Option<u64>,
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Presence {
     pub measures: Option<WslMeasures>,

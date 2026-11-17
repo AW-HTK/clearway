@@ -169,7 +169,7 @@ fn tool_list_and_instructions() {
     c.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
     let names: Vec<String> =
         c.next()["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
-    assert_eq!(names, ["request_clearance", "await_clearance", "release", "extend", "cancel", "status"]);
+    assert_eq!(names, ["request_clearance", "await_clearance", "release", "extend", "resize", "cancel", "status"]);
     assert!(Tools::<Fake>::info().instructions.contains("request_clearance"));
 }
 
@@ -267,6 +267,11 @@ fn immediate_clearance_and_simple_tools() {
     c.until_response(3);
     let extend = c.fake.requests("POST", "/42/extend");
     assert_eq!((extend[0].0.body["duration_s"].as_u64(), extend[0].0.body["reason"].as_str()), (Some(1200), Some("slower")));
+    c.call(6, "resize", json!({ "ticket": 42, "cpu": 1, "ram": "1G", "reason": "network bound" }));
+    c.until_response(6);
+    let resize = c.fake.requests("POST", "/42/resize");
+    let body = &resize[0].0.body;
+    assert_eq!((body["cpu"].as_u64(), body["ram_mb"].as_u64(), body["duration_s"].as_u64()), (Some(1), Some(1024), None));
     c.call(4, "cancel", json!({ "ticket": 42 }));
     c.until_response(4);
     assert_eq!(c.fake.requests("DELETE", "/tickets/42").len(), 1);
