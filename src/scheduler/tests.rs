@@ -580,7 +580,7 @@ fn room_taken_outside_queue_and_suggestion() {
     let r = &p.reasons[&1];
     assert_eq!(r.unblocked_at, None);
     assert!(r.message.contains("la place est prise hors file"), "{}", r.message);
-    assert!(r.message.contains("--ram 1.5G ou moins"), "{}", r.message);
+    assert!(r.message.contains("« clearway resize 1 --ram 1.5G » (ou moins)"), "{}", r.message);
 }
 
 #[test]
@@ -1128,4 +1128,31 @@ fn exclusive_goes_when_the_measured_load_allows() {
     let p = schedule(&e, &m, &c, H);
     assert!(p.events.is_empty());
     assert_eq!(p.reasons[&2].reserve.as_deref(), Some("exclusive"));
+}
+
+#[test]
+fn resize_only_lowers() {
+    let t = active(ticket(7, Side::Wsl, 2.0, 2, 30), H, 8.0);
+    let lower = |ram_mb, cpu, duration_s| lowered(&t, &Resize { ram_mb, cpu, duration_s, reason: String::new() }, H + 600);
+    assert_eq!(lower(None, Some(1), None), Ok(Need { ram_mb: 2048, cpu: 1, duration_s: 1800 }));
+    assert_eq!(lower(Some(1024), None, Some(1200)), Ok(Need { ram_mb: 1024, cpu: 2, duration_s: 1200 }));
+    assert!(lower(None, None, None).is_err());
+    assert!(lower(None, Some(0), None).is_err());
+    assert!(lower(None, Some(3), None).unwrap_err().contains("extend"));
+    assert!(lower(Some(4096), Some(1), None).is_err());
+    assert!(lower(None, None, Some(600)).unwrap_err().contains("10 min"));
+    let waiting = ticket(8, Side::Wsl, 2.0, 2, 30);
+    let r = lowered(&waiting, &Resize { duration_s: Some(60), ..Resize::default() }, H + 600);
+    assert_eq!(r, Ok(Need { ram_mb: 2048, cpu: 2, duration_s: 60 }));
+}
+
+#[test]
+fn lowering_an_active_ticket_clears_the_next() {
+    let mut e = state(vec![active(ticket(1, Side::Wsl, 1.0, 4, 30), H, 8.0), ticket(2, Side::Wsl, 1.0, 6, 5)]);
+    let p = schedule(&e, &large(), &config(), H + 60);
+    assert_eq!(state_of(&p.state, 2), Some(TicketState::Waiting));
+    let t = e.ticket_mut(1).unwrap();
+    t.need = lowered(t, &Resize { cpu: Some(2), ..Resize::default() }, H + 60).unwrap();
+    let p = schedule(&e, &large(), &config(), H + 60);
+    assert_eq!(p.events, vec![Event::Cleared(2)]);
 }

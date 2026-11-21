@@ -124,7 +124,7 @@ programme Windows ne peut démarrer : Codex passe donc uniquement par les outils
 - Relais : `clearway.exe relay [--pipe <nom>]` (stdin/stdout ↔ tube nommé ; code 69 si le serveur est absent, 74 si
   le tube se ferme).
 - Client (WSL) : `clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--duration 15m] [--max 9m] "description" --
-  commande…`, `clearway request`, `wait`, `extend`, `release`, `cancel`, `status`. Codes de sortie : 0, 1 ticket sorti
+  commande…`, `clearway request`, `wait`, `extend`, `resize`, `release`, `cancel`, `status`. Codes de sortie : 0, 1 ticket sorti
   de la file, 2 erreur, 3 refus, 75 toujours en attente après `--max` ou feu vert repris avant l'accusé de réception
   (relancer la même commande garde la place), 130 interrompu.
 - Garde : `clearway hook` / `clearway.exe hook` (événement PreToolUse sur stdin, refus sur stdout).
@@ -151,7 +151,7 @@ programme Windows ne peut démarrer : Codex passe donc uniquement par les outils
   `$XDG_RUNTIME_DIR/clearway-<pipe>.sock` hors de Windows. Une requête JSON par ligne
   (`{"method","path","params","body"}`), une réponse par ligne (`{"code","body"}`).
 - Routes : `POST /tickets`, `GET /tickets/{n}/wait` (`known`, `timeout_s`, `ack`), `POST /tickets/{n}/presence`,
-  `/extend`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
+  `/extend`, `/resize`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
   `/link/heartbeat`.
 - Multiplexage : une requête avec un `"id"` tourne dans son propre fil et sa réponse porte le même `id`, dans n'importe
   quel ordre ; sans `id`, les requêtes sont servies l'une après l'autre. Le relais copie dans les deux sens à la fois

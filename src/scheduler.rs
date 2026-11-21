@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::format::{cores, duration, gb, ram_option};
 use crate::i18n::Lang;
 use crate::model::{
-    DecisionKind, Hysteresis, Measures, Need, OrphanCause, Reason, ReserveView, Side, State, Ticket, TicketState, WslMeasures,
+    DecisionKind, Hysteresis, Measures, Need, OrphanCause, Reason, ReserveView, Resize, Side, State, Ticket, TicketState, WslMeasures,
 };
 use crate::system::hhmm;
 use crate::tr;
@@ -1308,8 +1308,9 @@ fn wait_reason(
             .unwrap_or(0);
         if max >= 256 {
             message += &tr!(
-                " A new request with --ram {} or less would pass now.",
-                " Une nouvelle demande avec --ram {} ou moins passerait maintenant.",
+                " `clearway resize {} --ram {}` (or less) would pass now.",
+                " « clearway resize {} --ram {} » (ou moins) passerait maintenant.",
+                t.id,
                 ram_option(max)
             );
         }
@@ -1317,8 +1318,9 @@ fn wait_reason(
         let max = lacking.iter().map(|r| lev[r.i()].free()).min().unwrap_or(0);
         if max >= 1 {
             message += &tr!(
-                " A new request with --cpu {max} would pass now.",
-                " Une nouvelle demande avec --cpu {max} passerait maintenant."
+                " `clearway resize {} --cpu {max}` would pass now.",
+                " « clearway resize {} --cpu {max} » passerait maintenant.",
+                t.id
             );
         }
     }
@@ -1357,6 +1359,45 @@ fn estimate(t: &Ticket, lev: &[Level; RESERVE_COUNT], e: &State, m: &Measures, c
         }
     }
     (None, Vec::new())
+}
+
+/// New need of `t` once lowered by `d`, or why it cannot be.
+pub fn lowered(t: &Ticket, d: &Resize, now: u64) -> Result<Need, String> {
+    let id = t.id;
+    if d.ram_mb.is_none() && d.cpu.is_none() && d.duration_s.is_none() {
+        return Err(tr!("nothing to lower: give ram, cpu or duration", "rien à baisser : indique ram, cpu ou duration"));
+    }
+    if t.state == TicketState::Orphaned {
+        return Err(tr!("Ticket #{id} orphaned: nothing to lower.", "Ticket #{id} orphelin : rien à baisser."));
+    }
+    if d.cpu == Some(0) {
+        return Err(tr!("cpu: at least 1 core", "cpu : 1 cœur au moins"));
+    }
+    let raised = d.ram_mb.is_some_and(|v| v > t.need.ram_mb)
+        || d.cpu.is_some_and(|v| v > t.need.cpu)
+        || d.duration_s.is_some_and(|v| v > t.need.duration_s);
+    if raised {
+        return Err(tr!(
+            "Ticket #{id}: resize only lowers ({}). To need more, `extend` the duration or request a new ticket.",
+            "Ticket #{id} : resize ne fait que baisser ({}). Pour plus, « extend » la durée ou demande un nouveau ticket.",
+            format!("{}, {}", need_summary(t), duration(t.need.duration_s))
+        ));
+    }
+    if let (Some(v), Some(granted), TicketState::Active) = (d.duration_s, t.granted, t.state) {
+        let elapsed = now.saturating_sub(granted);
+        if v <= elapsed {
+            return Err(tr!(
+                "Ticket #{id} already running for {}: give a longer duration, or release it if the task is done.",
+                "Ticket #{id} déjà en cours depuis {} : donne une durée plus longue, ou libère-le si la tâche est finie.",
+                duration(elapsed)
+            ));
+        }
+    }
+    Ok(Need {
+        ram_mb: d.ram_mb.unwrap_or(t.need.ram_mb),
+        cpu: d.cpu.unwrap_or(t.need.cpu),
+        duration_s: d.duration_s.unwrap_or(t.need.duration_s),
+    })
 }
 
 #[cfg(test)]

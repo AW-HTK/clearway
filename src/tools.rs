@@ -1,5 +1,5 @@
 //! Clearway's MCP tools: `request_clearance` blocks until the clearance, `await_clearance` resumes a wait,
-//! `release`, `extend`, `cancel` and `status` answer at once. Generic over the channel to the server.
+//! `release`, `extend`, `resize`, `cancel` and `status` answer at once. Generic over the channel to the server.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::format::{parse_duration, parse_ram};
 use crate::mcp::{Call, Provider, ServerInfo, ToolResult};
-use crate::model::{Extension, Release, Side, Status, TicketRequest, View};
+use crate::model::{Extension, Release, Resize, Side, Status, TicketRequest, View};
 use crate::protocol::{Request, Response};
 use crate::tr;
 
@@ -422,6 +422,22 @@ impl<C: Channel> Provider for Tools<C> {
                 }), &["ticket", "duration", "reason"]),
             }),
             json!({
+                "name": "resize",
+                "description": tr!(
+                    "Lowers the estimate of a waiting or active ticket (RAM, cores, duration) when the task needs less \
+                     than declared, so the queue moves on. Never raises: use extend or a new ticket.",
+                    "Baisse l'estimation d'un ticket en attente ou actif (RAM, cœurs, durée) quand la tâche demande moins \
+                     que prévu, pour que la file avance. Ne monte jamais : utilise extend ou un nouveau ticket."
+                ),
+                "inputSchema": schema(json!({
+                    "ticket": ticket,
+                    "ram": { "type": "string", "description": tr!("New peak RAM, e.g. \"1G\"", "Nouvelle RAM au pic, ex. « 1G »") },
+                    "cpu": { "type": "integer", "description": tr!("New number of cores", "Nouveau nombre de cœurs") },
+                    "duration": { "type": "string", "description": tr!("New total duration, e.g. \"20m\"", "Nouvelle durée totale, ex. « 20m »") },
+                    "reason": { "type": "string" }
+                }), &["ticket"]),
+            }),
+            json!({
                 "name": "cancel",
                 "description": tr!("Withdraws a waiting ticket or releases an active one.", "Retire un ticket en attente ou libère un ticket actif."),
                 "inputSchema": schema(json!({ "ticket": ticket }), &["ticket"]),
@@ -450,6 +466,23 @@ impl<C: Channel> Provider for Tools<C> {
                 let reason = arguments["reason"].as_str().unwrap_or("").to_owned();
                 let body = Extension { duration_s, reason };
                 Ok(self.simple("POST", format!("/tickets/{id}/extend"), serde_json::to_value(body).map_err(|e| e.to_string())?))
+            }
+            "resize" => {
+                let id = ticket_arg(arguments)?;
+                let ram_mb = match arguments["ram"].as_str() {
+                    Some(v) => Some(parse_ram(v).ok_or_else(|| tr!("unreadable `ram` (e.g. \"1G\")", "`ram` illisible (ex. « 1G »)"))?),
+                    None => None,
+                };
+                let duration_s = match arguments["duration"].as_str() {
+                    Some(v) => {
+                        Some(parse_duration(v).ok_or_else(|| tr!("unreadable `duration` (e.g. \"20m\")", "`duration` illisible (ex. « 20m »)"))?)
+                    }
+                    None => None,
+                };
+                let cpu = arguments["cpu"].as_u64().map(|c| c.min(u32::MAX as u64) as u32);
+                let reason = arguments["reason"].as_str().unwrap_or("").to_owned();
+                let body = Resize { ram_mb, cpu, duration_s, reason };
+                Ok(self.simple("POST", format!("/tickets/{id}/resize"), serde_json::to_value(body).map_err(|e| e.to_string())?))
             }
             "cancel" => {
                 let id = ticket_arg(arguments)?;

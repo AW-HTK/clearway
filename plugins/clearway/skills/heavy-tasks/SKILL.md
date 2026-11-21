@@ -30,7 +30,10 @@ minute, or the GPU.
 3. **Run the task** in the shell, as usual.
 4. **Release the slot** with `release(ticket, code)`, passing the exit code — also when the task failed. If the
    task takes longer than declared, call `extend(ticket, duration, reason)` before the lease ends.
-5. If you abandon the task, call `cancel(ticket)`.
+5. If the task needs less than declared (it mostly waits on the network, uses fewer cores, ends sooner), call
+   `resize(ticket, ram, cpu, duration, reason)` with the lower values, whether the ticket waits or runs: the
+   queue moves on at once. `resize` never raises a need.
+6. If you abandon the task, call `cancel(ticket)`.
 
 `status` shows the queue, the free resources and why each ticket waits. Report its explanation to the user
 when they ask why the task has not started.
