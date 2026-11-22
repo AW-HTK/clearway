@@ -199,9 +199,10 @@ fn ticket_summary(t: &Ticket) -> String {
         (Some(p), None) => format!(" {p}"),
         _ => String::new(),
     };
+    let gpu = if t.need.gpu_mb > 0 { format!(", GPU {}", gb(t.need.gpu_mb as i64)) } else { String::new() };
     clearway::tr!(
-        "[{}]{location} {} ({}, {}, {} core(s), {}{})",
-        "[{}]{location} {} ({}, {}, {} cœur(s), {}{})",
+        "[{}]{location} {} ({}, {}, {} core(s){gpu}, {}{})",
+        "[{}]{location} {} ({}, {}, {} cœur(s){gpu}, {}{})",
         t.session,
         t.description,
         t.side.name(),
@@ -568,6 +569,7 @@ impl Server {
                     granted: t.granted,
                     manual: t.manual,
                     force: t.force,
+                    priority: self.state.priority == Some(t.id),
                     lease_overrun: t.lease_overrun && t.state == TicketState::Active,
                     presence_age_s: now.saturating_sub(t.presence),
                     message: self.reasons.get(&t.id).map(|r| r.message.clone()).unwrap_or_default(),
@@ -756,6 +758,24 @@ impl Shared {
         r
     }
 
+    /// Gives `id` priority (or takes it back): from the window or `clearway priority`, which the command guard keeps
+    /// away from the sessions themselves.
+    pub fn set_priority(&self, id: u64, on: bool, origin: &str) -> Response {
+        let mut s = self.lock();
+        let (candidate, message) = match scheduler::set_priority(&s.state, id, on) {
+            Ok(v) => v,
+            Err(e) => return error(if s.state.ticket(id).is_some() { 409 } else { 404 }, &e),
+        };
+        let what = s.state.ticket(id).map(ticket_summary).unwrap_or_default();
+        let tag = if on { "PRIORITY" } else { "UNPRIORITIZED" };
+        let rep = match s.commit(candidate, true, None, Some(format!("{tag} #{id} {what} ({origin}) · {message}"))) {
+            Ok(()) => response(200, json!({ "id": id, "priority": on, "message": message })),
+            Err(e) => error(503, &e),
+        };
+        self.publish(s);
+        rep
+    }
+
     pub fn freeze(&self, frozen: bool, origin: &str) -> Response {
         let mut s = self.lock();
         if s.state.manual_freeze.is_some() == frozen {
@@ -880,6 +900,9 @@ pub fn handle(p: &Shared, req: &Request, ctx: &Context) -> Response {
         ("POST", ["tickets", n, "presence"]) => id(n).map_or_else(invalid, |i| presence(p, req, i)),
         ("POST", ["tickets", n, "extend"]) => id(n).map_or_else(invalid, |i| extend(p, req, i)),
         ("POST", ["tickets", n, "resize"]) => id(n).map_or_else(invalid, |i| resize(p, req, i)),
+        ("POST", ["tickets", n, "priority"]) => id(n).map_or_else(invalid, |i| {
+            p.set_priority(i, req.body["on"].as_bool().unwrap_or(true), &clearway::tr!("command", "commande"))
+        }),
         ("POST", ["tickets", n, "release"]) => id(n).map_or_else(invalid, |i| {
             let f: Release = serde_json::from_value(req.body.clone()).unwrap_or_default();
             p.close_ticket(i, &f, Closing::Release)
@@ -947,6 +970,7 @@ fn create(p: &Shared, req: &Request, ctx: &Context) -> Response {
         ram_mb: d.ram_mb.unwrap_or(default_need.ram_mb),
         cpu: d.cpu.unwrap_or(default_need.cpu),
         duration_s: d.duration_s.unwrap_or(default_need.duration_s),
+        gpu_mb: d.gpu_mb.unwrap_or(0),
     };
     if let Some(reason) = scheduler::refusal(d.side, &need, &s.measures, &s.config) {
         s.log(&format!("REFUSED [{}] {} · {}", d.session, d.description, reason.message));
@@ -992,6 +1016,7 @@ fn create(p: &Shared, req: &Request, ctx: &Context) -> Response {
         base_ram_windows_mb: None,
         base_ram_wsl_mb: None,
         base_vmmem_mb: None,
+        base_gpu_mb: None,
         overtakes: 0,
         link,
         identity,
@@ -1217,9 +1242,10 @@ fn resize(p: &Shared, req: &Request, id: u64) -> Response {
         c.need = need;
         c.presence = now;
     }
+    let gpu = if need.gpu_mb > 0 { format!(", GPU {}", gb(need.gpu_mb as i64)) } else { String::new() };
     let message = clearway::tr!(
-        "Ticket #{id} lowered to {}, {} core(s), {}.",
-        "Ticket #{id} baissé à {}, {} cœur(s), {}.",
+        "Ticket #{id} lowered to {}, {} core(s){gpu}, {}.",
+        "Ticket #{id} baissé à {}, {} cœur(s){gpu}, {}.",
         gb(need.ram_mb as i64),
         need.cpu,
         duration(need.duration_s)

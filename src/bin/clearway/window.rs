@@ -4,22 +4,24 @@ use std::cell::{Cell, RefCell};
 use std::sync::{Mutex, Once};
 
 use clearway::format::{cores, duration, gb};
-use clearway::model::{Release, Status, TicketState, TicketView};
+use clearway::model::{Gpu, Release, ReserveView, Status, TicketState, TicketView};
 use clearway::scheduler::fresh_wsl;
 use clearway::system::hhmm;
 use clearway::tr;
 use clearway::visual::{self as v, Canvas, Fonts, inset, rect, wide};
-use windows_sys::Win32::Foundation::{HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{GlobalFree, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
     ACTCTXW, ActivateActCtx, CreateActCtxW, DeactivateActCtx, ReleaseActCtx,
 };
+use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, MEASUREITEMSTRUCT, ODS_FOCUS,
     ODS_NOFOCUSRECT, ODS_SELECTED,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetKeyState, VK_CONTROL};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::server::{Closing, log_tail};
@@ -33,8 +35,14 @@ const ID_LOG_BUTTON: usize = 104;
 const ID_LOG: usize = 105;
 const ID_FORCE: usize = 106;
 const ID_SESSIONS: usize = 107;
+const ID_PRIORITY: usize = 108;
+const MENU_COPY_NUMBER: usize = 200;
+const MENU_COPY_REASON: usize = 201;
+const MENU_COPY_LINE: usize = 202;
 const TIMER: usize = 1;
-const CARD_HEIGHT: i32 = 124;
+const CARD_HEIGHT: i32 = 152;
+const RESOURCE_ROW: i32 = 84;
+const CF_UNICODETEXT: u32 = 13;
 const SINGLE: u32 = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
 const WRAP: u32 = DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS;
 
@@ -47,23 +55,24 @@ struct Layout {
     activity_top: i32,
     side: i32,
     side_width: i32,
+    /// Height of the resources panel, which grows with the graphics cards.
+    resources_height: i32,
 }
 
 thread_local! {
     static MAIN: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
     static LIST: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
-    static BUTTONS: Cell<[HWND; 5]> = const { Cell::new([std::ptr::null_mut(); 5]) };
+    static BUTTONS: Cell<[HWND; 6]> = const { Cell::new([std::ptr::null_mut(); 6]) };
     static LOG: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
     static SESSIONS: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
-    static DETAIL: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
     static ALERT: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
     static FONTS: RefCell<Option<Fonts>> = const { RefCell::new(None) };
     static SCALE: Cell<f32> = const { Cell::new(1.0) };
     static STATUS: RefCell<Option<Status>> = const { RefCell::new(None) };
     static LOG_LINES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    static LAYOUT: Cell<Layout> = const { Cell::new(Layout { left: 0, width: 0, queue_top: 0, queue_height: 0, activity_top: 0, side: 0, side_width: 0 }) };
-    static DETAIL_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
-    static LOG_DETAIL: RefCell<Option<String>> = const { RefCell::new(None) };
+    static LAYOUT: Cell<Layout> = const {
+        Cell::new(Layout { left: 0, width: 0, queue_top: 0, queue_height: 0, activity_top: 0, side: 0, side_width: 0, resources_height: 0 })
+    };
 }
 
 fn state_label(state: TicketState) -> String {
@@ -240,16 +249,18 @@ unsafe fn create_children(h: HWND) {
     unsafe {
         let style =
             WS_TABSTOP | WS_VSCROLL | (LBS_NOTIFY | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT) as u32;
+        // Keystrokes come to the window first (WM_VKEYTOITEM), for Ctrl+C.
+        let keyed = style | LBS_WANTKEYBOARDINPUT as u32;
         LIST.with(|l| {
             l.set(child(
                 h,
                 "LISTBOX",
                 &tr!("Task queue", "File des tâches"),
-                style,
+                keyed,
                 ID_LIST,
             ))
         });
-        LOG.with(|l| l.set(child(h, "LISTBOX", &tr!("Activity", "Activité"), style, ID_LOG)));
+        LOG.with(|l| l.set(child(h, "LISTBOX", &tr!("Activity", "Activité"), keyed, ID_LOG)));
         SESSIONS.with(|l| {
             l.set(child(
                 h,
@@ -257,15 +268,6 @@ unsafe fn create_children(h: HWND) {
                 &tr!("Connected sessions", "Sessions reliées"),
                 style,
                 ID_SESSIONS,
-            ))
-        });
-        DETAIL.with(|l| {
-            l.set(child(
-                h,
-                "EDIT",
-                "",
-                WS_TABSTOP | WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
-                0,
             ))
         });
         ALERT.with(|l| {
@@ -283,6 +285,7 @@ unsafe fn create_children(h: HWND) {
                 button(&tr!("Cancel request…", "Annuler…"), ID_CANCEL),
                 button(&tr!("Release slot…", "Libérer…"), ID_FREE),
                 button(&tr!("Force through…", "Forcer…"), ID_FORCE),
+                button(&tr!("Priority…", "Prioritaire…"), ID_PRIORITY),
                 button(&tr!("Freeze queue", "Geler la file"), ID_FREEZE),
                 button(&tr!("Journal", "Journal"), ID_LOG_BUTTON),
             ])
@@ -306,7 +309,9 @@ unsafe fn lay_out(h: HWND) {
             .min((rc.bottom - s(450) - alert_height).max(s(140)))
             .max(s(CARD_HEIGHT));
         let actions_y = queue_top + queue_height + s(8);
-        let activity_top = actions_y + s(162);
+        let activity_top = actions_y + s(52);
+        let rows = STATUS.with(|st| st.borrow().as_ref().map_or(4, |st| resource_rows(st).len())) as i32;
+        let resources_height = s(110 + rows * RESOURCE_ROW);
         LAYOUT.with(|l| {
             l.set(Layout {
                 left: m,
@@ -316,25 +321,20 @@ unsafe fn lay_out(h: HWND) {
                 activity_top,
                 side,
                 side_width,
+                resources_height,
             })
         });
+        let sessions_top = s(88) + resources_height + s(14);
         MoveWindow(LIST.with(Cell::get), m, queue_top, width, queue_height, 1);
         MoveWindow(ALERT.with(Cell::get), m + s(8), s(124), width - s(16), s(46), 1);
         ShowWindow(ALERT.with(Cell::get), if has_alerts { SW_SHOW } else { SW_HIDE });
-        let [cancel, release, force, freeze, log] = BUTTONS.with(Cell::get);
+        let [cancel, release, force, priority, freeze, log] = BUTTONS.with(Cell::get);
         for (i, b) in [cancel, release, force].into_iter().enumerate() {
             MoveWindow(b, m + i as i32 * s(140), actions_y, s(132), s(36), 1);
         }
+        MoveWindow(priority, m + 3 * s(140), actions_y, s(172), s(36), 1);
         MoveWindow(freeze, side + side_width - s(248), s(18), s(142), s(36), 1);
         MoveWindow(log, side + side_width - s(98), s(18), s(98), s(36), 1);
-        MoveWindow(
-            DETAIL.with(Cell::get),
-            m + s(12),
-            actions_y + s(48),
-            width - s(24),
-            s(94),
-            1,
-        );
         MoveWindow(
             LOG.with(Cell::get),
             m + s(12),
@@ -346,9 +346,9 @@ unsafe fn lay_out(h: HWND) {
         MoveWindow(
             SESSIONS.with(Cell::get),
             side + s(14),
-            s(580),
+            sessions_top + s(42),
             side_width - s(28),
-            (rc.bottom - s(608)).max(s(48)),
+            (rc.bottom - sessions_top - s(70)).max(s(48)),
             1,
         );
         InvalidateRect(h, std::ptr::null(), 0);
@@ -377,50 +377,61 @@ fn state_of(id: u64) -> Option<(TicketState, String)> {
     })
 }
 
-fn ticket_text(t: &TicketView) -> String {
-    let mut state = state_label(t.state);
-    if t.lease_overrun {
-        state += &tr!(" · overdue", " · bail dépassé");
-    }
-    if t.force {
-        state += &tr!(" · forced", " · forcé");
-    }
-    if t.manual {
-        state += &tr!(" · manual", " · manuel");
-    }
+/// Flags shown on the card and read by screen readers.
+fn flags(t: &TicketView) -> Vec<String> {
+    [
+        (t.priority, tr!("priority", "prioritaire")),
+        (t.lease_overrun, tr!("overdue", "bail dépassé")),
+        (t.force, tr!("forced", "forcé")),
+        (t.manual, tr!("manual", "manuel")),
+    ]
+    .into_iter()
+    .filter_map(|(on, text)| on.then_some(text))
+    .collect()
+}
+
+fn need_text(t: &TicketView) -> String {
+    let gpu = if t.need.gpu_mb > 0 { format!(" · GPU {}", gb(t.need.gpu_mb as i64)) } else { String::new() };
     format!(
-        "#{} · {} · {}\r\n{} · {} · {}\r\n{} · {} · {} · {}\r\n{}",
+        "{} · {} · {} · {}{gpu}",
+        t.side.name(),
+        gb(t.need.ram_mb as i64),
+        cores(t.need.cpu as i64),
+        duration(t.need.duration_s)
+    )
+}
+
+/// Accessible text of a card: everything it draws.
+fn ticket_text(t: &TicketView) -> String {
+    let mut state = vec![state_label(t.state)];
+    state.extend(flags(t));
+    format!(
+        "#{} · {} · {}\r\n{} · {} · {}\r\n{}\r\n{}",
         t.id,
-        state,
+        state.join(" · "),
         t.description,
         t.session,
         t.project.as_deref().unwrap_or("—"),
         t.branch.as_deref().unwrap_or("—"),
-        t.side.name(),
-        gb(t.need.ram_mb as i64),
-        cores(t.need.cpu as i64),
-        duration(t.need.duration_s),
+        need_text(t),
         t.message
     )
 }
 
-fn detail_text(value: String) {
-    let changed = DETAIL_TEXT.with(|d| {
-        if *d.borrow() == value {
-            return false;
-        }
-        *d.borrow_mut() = value.clone();
-        true
-    });
-    if changed {
-        unsafe { SetWindowTextW(DETAIL.with(Cell::get), wide(&value).as_ptr()) };
-    }
+fn selected_ticket() -> Option<TicketView> {
+    let chosen = selection()?;
+    STATUS.with(|s| s.borrow().as_ref()?.tickets.iter().find(|t| t.id == chosen).cloned())
 }
 
 fn update_buttons() {
-    let chosen = selection();
-    let state = chosen.and_then(state_of).map(|(e, _)| e);
-    let [cancel, release, force, _, _] = BUTTONS.with(Cell::get);
+    let chosen = selected_ticket();
+    let state = chosen.as_ref().map(|t| t.state);
+    let [cancel, release, force, priority, _, _] = BUTTONS.with(Cell::get);
+    let label = if chosen.as_ref().is_some_and(|t| t.priority) {
+        tr!("Remove priority", "Retirer la priorité")
+    } else {
+        tr!("Priority…", "Prioritaire…")
+    };
     unsafe {
         EnableWindow(cancel, (state == Some(TicketState::Waiting)) as i32);
         EnableWindow(force, (state == Some(TicketState::Waiting)) as i32);
@@ -428,20 +439,146 @@ fn update_buttons() {
             release,
             matches!(state, Some(TicketState::Active | TicketState::Orphaned)) as i32,
         );
+        EnableWindow(priority, chosen.is_some() as i32);
+        let mut current = [0u16; 64];
+        let n = GetWindowTextW(priority, current.as_mut_ptr(), current.len() as i32);
+        if String::from_utf16_lossy(&current[..n.max(0) as usize]) != label {
+            SetWindowTextW(priority, wide(&label).as_ptr());
+            InvalidateRect(priority, std::ptr::null(), 0);
+        }
     }
-    let value = STATUS
-        .with(|s| {
-            s.borrow()
-                .as_ref()
-                .and_then(|st| st.tickets.iter().find(|t| Some(t.id) == chosen).map(ticket_text))
-        })
-        .unwrap_or_else(|| {
-            tr!(
-                "Select a ticket to see its details and available actions.",
-                "Sélectionnez un ticket pour lire ses détails et accéder aux actions."
-            )
-        });
-    detail_text(LOG_DETAIL.with(|l| l.borrow().clone()).unwrap_or(value));
+}
+
+fn copy_text(h: HWND, text: &str) {
+    let units = wide(text);
+    unsafe {
+        if OpenClipboard(h) == 0 {
+            return;
+        }
+        EmptyClipboard();
+        let memory = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2);
+        if !memory.is_null() {
+            let target = GlobalLock(memory).cast::<u16>();
+            let copied = !target.is_null() && {
+                std::ptr::copy_nonoverlapping(units.as_ptr(), target, units.len());
+                GlobalUnlock(memory);
+                !SetClipboardData(CF_UNICODETEXT, memory).is_null()
+            };
+            // Once set, the clipboard owns the memory.
+            if !copied {
+                GlobalFree(memory);
+            }
+        }
+        CloseClipboard();
+    }
+}
+
+fn selected_log_line() -> Option<String> {
+    let i = unsafe { SendMessageW(LOG.with(Cell::get), LB_GETCURSEL, 0, 0) };
+    LOG_LINES.with(|l| usize::try_from(i).ok().and_then(|i| l.borrow().get(i).cloned()))
+}
+
+/// Right-click menu of a card or an activity line; selects the row under the cursor first.
+unsafe fn context_menu(h: HWND, list: HWND, lparam: LPARAM) {
+    unsafe {
+        let mut at = POINT { x: (lparam & 0xffff) as i16 as i32, y: ((lparam >> 16) & 0xffff) as i16 as i32 };
+        if lparam == -1 {
+            let mut rc: RECT = std::mem::zeroed();
+            GetWindowRect(list, &mut rc);
+            at = POINT { x: rc.left + s(24), y: rc.top + s(24) };
+        } else {
+            let mut client = at;
+            ScreenToClient(list, &mut client);
+            let hit = SendMessageW(list, LB_ITEMFROMPOINT, 0, ((client.y as u16 as isize) << 16) | client.x as u16 as isize);
+            // High word set: the point is below the last row.
+            if (hit >> 16) & 0xffff == 0 {
+                SendMessageW(list, LB_SETCURSEL, (hit & 0xffff) as usize, 0);
+                update_buttons();
+            }
+        }
+        let menu = CreatePopupMenu();
+        let item = |id: usize, text: &str, enabled: bool| {
+            AppendMenuW(menu, if enabled { MF_STRING } else { MF_STRING | MF_GRAYED }, id, wide(text).as_ptr());
+        };
+        if list == LOG.with(Cell::get) {
+            item(MENU_COPY_LINE, &tr!("Copy the line", "Copier la ligne"), selected_log_line().is_some());
+        } else {
+            let t = selected_ticket();
+            let number = t.as_ref().map_or(String::new(), |t| format!(" ({})", t.id));
+            item(MENU_COPY_NUMBER, &tr!("Copy the number{number}\tCtrl+C", "Copier le numéro{number}\tCtrl+C"), t.is_some());
+            item(MENU_COPY_REASON, &tr!("Copy the reason", "Copier le motif"), t.is_some());
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+            let state = t.as_ref().map(|t| t.state);
+            let label = if t.as_ref().is_some_and(|t| t.priority) {
+                tr!("Remove priority", "Retirer la priorité")
+            } else {
+                tr!("Priority…", "Prioritaire…")
+            };
+            item(ID_PRIORITY, &label, t.is_some());
+            item(ID_FORCE, &tr!("Force through…", "Forcer…"), state == Some(TicketState::Waiting));
+            item(ID_CANCEL, &tr!("Cancel request…", "Annuler…"), state == Some(TicketState::Waiting));
+            item(ID_FREE, &tr!("Release slot…", "Libérer…"), matches!(state, Some(TicketState::Active | TicketState::Orphaned)));
+        }
+        let chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, 0, h, std::ptr::null()) as usize;
+        DestroyMenu(menu);
+        if chosen != 0 && command(h, chosen) {
+            refresh(h);
+        }
+    }
+}
+
+/// Runs a button or menu command; true if the window must refresh.
+fn command(h: HWND, id: usize) -> bool {
+    match id {
+        MENU_COPY_NUMBER => {
+            if let Some(t) = selected_ticket() {
+                copy_text(h, &t.id.to_string());
+            }
+            false
+        }
+        MENU_COPY_REASON => {
+            if let Some(t) = selected_ticket() {
+                copy_text(h, &ticket_text(&t).replace("\r\n", "\n"));
+            }
+            false
+        }
+        MENU_COPY_LINE => {
+            if let Some(line) = selected_log_line() {
+                copy_text(h, &line);
+            }
+            false
+        }
+        ID_CANCEL | ID_FREE => {
+            if let Some(id_ticket) = selection() {
+                confirm(h, id_ticket, id == ID_FREE);
+            }
+            true
+        }
+        ID_FORCE => {
+            if let Some(id_ticket) = selection() {
+                confirm_force(h, id_ticket);
+            }
+            true
+        }
+        ID_PRIORITY => {
+            if let Some(t) = selected_ticket() {
+                confirm_priority(h, &t);
+            }
+            true
+        }
+        ID_FREEZE => {
+            let frozen = STATUS.with(|s| s.borrow().as_ref().is_some_and(|s| s.manual_freeze.is_some()));
+            if let Some(p) = shared() {
+                p.freeze(!frozen, &tr!("window", "fenêtre"));
+            }
+            true
+        }
+        ID_LOG_BUTTON => {
+            ui::open_log();
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Rebuild only when the accessible strings change; preserve the selection and scroll position.
@@ -489,8 +626,8 @@ fn refresh(h: HWND) {
                 })
                 .as_ref()
                 != Some(&sessions),
-            s.as_ref().map(|s| (s.tickets.len(), s.alerts.is_empty()))
-                != Some((status.tickets.len(), status.alerts.is_empty())),
+            s.as_ref().map(|s| (s.tickets.len(), s.alerts.is_empty(), resource_rows(s).len()))
+                != Some((status.tickets.len(), status.alerts.is_empty(), resource_rows(&status).len())),
         )
     });
     let old_top = unsafe { SendMessageW(list, LB_GETTOPINDEX, 0, 0).max(0) as usize };
@@ -547,7 +684,7 @@ fn refresh(h: HWND) {
         ShowWindow(LOG.with(Cell::get), if lines.is_empty() { SW_HIDE } else { SW_SHOW });
         let frozen = status.manual_freeze.is_some();
         SetWindowTextW(
-            BUTTONS.with(Cell::get)[3],
+            BUTTONS.with(Cell::get)[4],
             wide(&if frozen {
                 tr!("Resume queue", "Reprendre la file")
             } else {
@@ -605,7 +742,9 @@ unsafe fn draw_ticket(d: &DRAWITEMSTRUCT, f: &Fonts, t: &TicketView, now: u64) {
     );
     c.text(
         rect(badge.left + s(3), badge.top + s(44), s(70), s(36)),
-        &if t.lease_overrun {
+        &if t.priority {
+            tr!("Priority", "Prioritaire")
+        } else if t.lease_overrun {
             tr!("Overdue", "Bail dépassé")
         } else {
             state_label(t.state)
@@ -631,15 +770,22 @@ unsafe fn draw_ticket(d: &DRAWITEMSTRUCT, f: &Fonts, t: &TicketView, now: u64) {
         v::MUTED,
         SINGLE,
     );
-    c.text(
-        rect(x, r.top + s(62), w, s(18)),
-        t.branch.as_deref().unwrap_or("—"),
-        f.mono,
-        v::MUTED,
-        SINGLE,
-    );
-    c.text(rect(x, r.top + s(84), w, s(18)), &t.message, f.small, ink, SINGLE);
-    c.fill(rect(meta_x - s(10), r.top + s(14), 1, s(84)), v::BORDER);
+    let marks = flags(t);
+    let branch = t.branch.as_deref().unwrap_or("—");
+    let branch_w = if marks.is_empty() { w } else { w * 3 / 5 };
+    c.text(rect(x, r.top + s(62), branch_w, s(18)), branch, f.mono, v::MUTED, SINGLE);
+    if !marks.is_empty() {
+        c.text(
+            rect(x + branch_w + s(12), r.top + s(62), (w - branch_w - s(12)).max(0), s(18)),
+            &marks.join(" · "),
+            f.small,
+            if t.priority { v::NAVY } else { ink },
+            SINGLE,
+        );
+    }
+    // The whole reason, on up to three lines: the card replaces the former detail pane.
+    c.text(rect(x, r.top + s(84), w, s(52)), &t.message, f.small, ink, WRAP);
+    c.fill(rect(meta_x - s(10), r.top + s(14), 1, s(CARD_HEIGHT - 38)), v::BORDER);
     c.text(
         rect(meta_x, r.top + s(14), s(160), s(20)),
         &format!("{} · {}", t.side.name(), gb(t.need.ram_mb as i64)),
@@ -654,6 +800,15 @@ unsafe fn draw_ticket(d: &DRAWITEMSTRUCT, f: &Fonts, t: &TicketView, now: u64) {
         v::MUTED,
         SINGLE,
     );
+    if t.need.gpu_mb > 0 {
+        c.text(
+            rect(meta_x, r.top + s(60), s(160), s(20)),
+            &format!("GPU {}", gb(t.need.gpu_mb as i64)),
+            f.small,
+            v::MUTED,
+            SINGLE,
+        );
+    }
     let timing = if let Some(start) = t.granted {
         if t.lease_overrun {
             tr!(
@@ -672,7 +827,7 @@ unsafe fn draw_ticket(d: &DRAWITEMSTRUCT, f: &Fonts, t: &TicketView, now: u64) {
         )
     };
     c.text(
-        rect(meta_x, r.top + s(64), s(160), s(20)),
+        rect(meta_x, r.top + s(84), s(160), s(20)),
         &timing,
         f.small,
         ink,
@@ -680,7 +835,7 @@ unsafe fn draw_ticket(d: &DRAWITEMSTRUCT, f: &Fonts, t: &TicketView, now: u64) {
     );
     if let Some(start) = t.granted {
         let w = s(148);
-        let track = rect(meta_x, r.top + s(94), w, s(4));
+        let track = rect(meta_x, r.top + s(114), w, s(4));
         c.fill(track, v::TRACK);
         let used = (now.saturating_sub(start) as f64 / t.need.duration_s.max(1) as f64).clamp(0.0, 1.0);
         c.fill(
@@ -713,6 +868,8 @@ unsafe fn draw_activity(d: &DRAWITEMSTRUCT, f: &Fonts, line: &str) {
         "CLEARED" => (tr!("CLEARED", "EN PISTE"), v::GREEN_INK),
         "REQUEST" => (tr!("REQUEST", "DEMANDE"), v::MUTED),
         "WAITING" => (tr!("WAITING", "ATTENTE"), v::AMBER),
+        "PRIORITY" => (tr!("PRIORITY", "PRIORITÉ"), v::NAVY),
+        "UNPRIORITIZED" => (tr!("PRIORITY OFF", "PRIORITÉ RETIRÉE"), v::MUTED),
         "ERROR" => (tr!("ERROR", "ERREUR"), v::RED),
         _ => (kind.to_owned(), v::MUTED),
     };
@@ -735,6 +892,99 @@ unsafe fn draw_activity(d: &DRAWITEMSTRUCT, f: &Fonts, line: &str) {
     if d.itemState & ODS_FOCUS != 0 {
         c.focus(inset(r, 1, 1));
     }
+}
+
+/// A line of the resources panel: a reserve, or a dedicated card the GPU reserve does not stand for.
+enum ResourceRow<'a> {
+    Reserve(&'a ReserveView),
+    Card(&'a Gpu),
+}
+
+fn resource_rows(st: &Status) -> Vec<ResourceRow<'_>> {
+    let mut rows: Vec<ResourceRow> =
+        st.reserves.iter().filter(|r| r.key != "gpu" || r.total > 0).map(ResourceRow::Reserve).collect();
+    let reserved = st.reserves.iter().find_map(|r| r.card.as_deref());
+    rows.extend(st.measures.gpus.iter().filter(|g| Some(g.luid.as_str()) != reserved).map(ResourceRow::Card));
+    rows
+}
+
+fn card_name(st: &Status, luid: Option<&str>) -> Option<String> {
+    st.measures.gpus.iter().find(|g| Some(g.luid.as_str()) == luid).map(|g| g.name.clone())
+}
+
+fn draw_resource(c: &Canvas, f: &Fonts, st: &Status, row: &ResourceRow, x: i32, y: i32, width: i32) {
+    let (name, total, used, reserve, margin, free, legend, teal) = match row {
+        ResourceRow::Reserve(r) => {
+            let unit = |n| if r.key.starts_with("cpu") { cores(n) } else { gb(n) };
+            let used = match r.key.as_str() {
+                "cpu_windows" => (st.measures.cpu_pct as f64 * r.total as f64 / 100.0).round() as i64,
+                "cpu" => fresh_wsl(&st.measures, st.now).map_or(0, |w| w.busy_cores.unwrap_or(w.load1).round() as i64),
+                _ => (r.total - r.available).max(0),
+            };
+            let legend = if r.key == "ram_wsl" && st.measures.vmmem.is_none() {
+                tr!("WSL stopped", "WSL arrêté")
+            } else if r.key == "cpu" && fresh_wsl(&st.measures, st.now).is_none() {
+                tr!(
+                    "WSL load unavailable · {} reserved",
+                    "Charge WSL indisponible · {} réservés",
+                    unit(r.reserve)
+                )
+            } else if r.estimate.is_some() {
+                r.free_text()
+            } else {
+                let busy = match (r.key.as_str(), r.used_pct) {
+                    ("gpu", Some(p)) => tr!(" · busy {p} %", " · occupé {p} %"),
+                    _ => String::new(),
+                };
+                tr!(
+                    "{} used · {} reserved · margin {} · of {}{busy}",
+                    "{} utilisés · {} réservés · marge {} · sur {}{busy}",
+                    unit(used),
+                    unit(r.reserve),
+                    unit(r.margin),
+                    unit(r.total)
+                )
+            };
+            let name = match r.key.as_str() {
+                "gpu" => card_name(st, r.card.as_deref()).unwrap_or_else(|| r.name.clone()),
+                _ => r.name.clone(),
+            };
+            let free = if r.key.starts_with("cpu") { cores(r.free.max(0)) } else { gb(r.free.max(0)) };
+            (name, r.total, used, r.reserve, r.margin, Some(free), legend, r.key == "cpu" || r.key == "ram_wsl")
+        }
+        ResourceRow::Card(g) => {
+            let used = g.vram_used_mb.unwrap_or(0) as i64;
+            let busy = g.busy_pct.map_or(String::new(), |p| tr!(" · busy {p:.0} %", " · occupé {p:.0} %"));
+            let legend = tr!(
+                "{} used of {}{busy} · not reservable (gpu.adapter)",
+                "{} utilisés sur {}{busy} · non réservable (gpu.adapter)",
+                gb(used),
+                gb(g.vram_total_mb as i64)
+            );
+            (g.name.clone(), g.vram_total_mb as i64, used, 0, 0, None, legend, false)
+        }
+    };
+    let name_width = if free.is_some() { width - s(110) } else { width };
+    c.text(rect(x, y, name_width, s(20)), &name, f.body, v::INK, SINGLE);
+    if let Some(free) = free {
+        c.text(
+            rect(x, y, width, s(20)),
+            &tr!("{free} free", "{free} libres"),
+            f.mono,
+            v::INK,
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
+        );
+    }
+    let bar = rect(x, y + s(28), width, s(10));
+    c.fill(bar, v::TRACK);
+    let mut start = x;
+    for (amount, color) in [(used, if teal { v::TEAL } else { v::BLUE }), (reserve, v::GREEN), (margin, v::MARGIN)] {
+        let pixels = (width as f64 * amount.max(0) as f64 / total.max(1) as f64) as i32;
+        let end = (start + pixels).min(bar.right);
+        c.fill(rect(start, bar.top, end - start, s(10)), color);
+        start = end;
+    }
+    c.text(rect(x, y + s(46), width, s(30)), &legend, f.small, v::MUTED, WRAP);
 }
 
 unsafe fn draw(h: HWND, dc: HDC) {
@@ -788,13 +1038,7 @@ unsafe fn draw(h: HWND, dc: HDC) {
             v::INK,
             SINGLE,
         );
-        c.panel(
-            rect(l.left, l.queue_top + l.queue_height + s(50), l.width, s(108)),
-            v::PAPER,
-            v::BORDER,
-            s(10),
-        );
-        c.panel(rect(l.side, s(88), l.side_width, s(436)), v::PAPER, v::BORDER, s(10));
+        c.panel(rect(l.side, s(88), l.side_width, l.resources_height), v::PAPER, v::BORDER, s(10));
         c.text(
             rect(l.side + s(16), s(102), l.side_width - s(32), s(24)),
             &tr!("Resources", "Ressources"),
@@ -802,14 +1046,15 @@ unsafe fn draw(h: HWND, dc: HDC) {
             v::INK,
             SINGLE,
         );
+        let sessions_top = s(88) + l.resources_height + s(14);
         c.panel(
-            rect(l.side, s(538), l.side_width, rc.bottom - s(558)),
+            rect(l.side, sessions_top, l.side_width, rc.bottom - sessions_top - s(20)),
             v::PAPER,
             v::BORDER,
             s(10),
         );
         c.text(
-            rect(l.side + s(16), s(548), l.side_width - s(32), s(24)),
+            rect(l.side + s(16), sessions_top + s(10), l.side_width - s(32), s(24)),
             &tr!("Connected sessions", "Sessions reliées"),
             f.strong,
             v::INK,
@@ -866,73 +1111,13 @@ unsafe fn draw(h: HWND, dc: HDC) {
                     WRAP,
                 );
             }
-            for (i, r) in st.reserves.iter().enumerate() {
-                let y = s(146 + i as i32 * 84);
-                let x = l.side + s(16);
-                let width = l.side_width - s(32);
-                c.text(rect(x, y, width, s(20)), &r.name, f.body, v::INK, SINGLE);
-                let free = if r.key.starts_with("cpu") {
-                    cores(r.free.max(0))
-                } else {
-                    gb(r.free.max(0))
-                };
-                c.text(
-                    rect(x, y, width, s(20)),
-                    &tr!("{free} free", "{free} libres"),
-                    f.mono,
-                    v::INK,
-                    DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
-                );
-                let used = match r.key.as_str() {
-                    "cpu_windows" => (st.measures.cpu_pct as f64 * r.total as f64 / 100.0).round() as i64,
-                    "cpu" => fresh_wsl(&st.measures, st.now).map_or(0, |w| w.busy_cores.unwrap_or(w.load1).round() as i64),
-                    _ => (r.total - r.available).max(0),
-                };
-                let bar = rect(x, y + s(28), width, s(10));
-                c.fill(bar, v::TRACK);
-                let mut start = x;
-                for (amount, color) in [
-                    (
-                        used,
-                        if r.key == "cpu" || r.key == "ram_wsl" {
-                            v::TEAL
-                        } else {
-                            v::BLUE
-                        },
-                    ),
-                    (r.reserve, v::GREEN),
-                    (r.margin, v::MARGIN),
-                ] {
-                    let pixels = (width as f64 * amount.max(0) as f64 / r.total.max(1) as f64) as i32;
-                    let end = (start + pixels).min(bar.right);
-                    c.fill(rect(start, bar.top, end - start, s(10)), color);
-                    start = end;
-                }
-                let unit = |n| if r.key.starts_with("cpu") { cores(n) } else { gb(n) };
-                let legend = if r.key == "ram_wsl" && st.measures.vmmem.is_none() {
-                    tr!("WSL stopped", "WSL arrêté")
-                } else if r.key == "cpu" && fresh_wsl(&st.measures, st.now).is_none() {
-                    tr!(
-                        "WSL load unavailable · {} reserved",
-                        "Charge WSL indisponible · {} réservés",
-                        unit(r.reserve)
-                    )
-                } else if r.estimate.is_some() {
-                    r.free_text()
-                } else {
-                    tr!(
-                        "{} used · {} reserved · margin {} · of {}",
-                        "{} utilisés · {} réservés · marge {} · sur {}",
-                        unit(used),
-                        unit(r.reserve),
-                        unit(r.margin),
-                        unit(r.total)
-                    )
-                };
-                c.text(rect(x, y + s(46), width, s(30)), &legend, f.small, v::MUTED, WRAP);
+            let rows = resource_rows(st);
+            for (i, row) in rows.iter().enumerate() {
+                let y = s(146) + i as i32 * s(RESOURCE_ROW);
+                draw_resource(&c, f, st, row, l.side + s(16), y, l.side_width - s(32));
             }
             c.text(
-                rect(l.side + s(16), s(490), l.side_width - s(32), s(22)),
+                rect(l.side + s(16), s(88) + l.resources_height - s(34), l.side_width - s(32), s(22)),
                 &tr!(
                     "Used / reserved / margin · updated every 2 s",
                     "Utilisé / réservé / marge · actualisé toutes les 2 s"
@@ -943,7 +1128,7 @@ unsafe fn draw(h: HWND, dc: HDC) {
             );
             if st.links.is_empty() {
                 c.text(
-                    rect(l.side + s(16), s(590), l.side_width - s(32), s(46)),
+                    rect(l.side + s(16), sessions_top + s(52), l.side_width - s(32), s(46)),
                     &tr!("No MCP session connected.", "Aucune session MCP reliée."),
                     f.body,
                     v::MUTED,
@@ -1004,6 +1189,35 @@ fn confirm_force(h: HWND, id: u64) {
         && let Err(e) = p.force_through(id)
     {
         unsafe { MessageBoxW(h, wide(&e).as_ptr(), title.as_ptr(), MB_ICONWARNING) };
+    }
+}
+
+fn confirm_priority(h: HWND, t: &TicketView) {
+    let Some(p) = shared() else { return };
+    let title = wide(&tr!("Priority", "Ticket prioritaire"));
+    let id = t.id;
+    if !t.priority {
+        let question = tr!(
+            "Give ticket #{id} priority?\n\n{} — {}\n\nNo other ticket is admitted any more. The active tickets are \
+             asked to start no new heavy command (the guard refuses them); their current command finishes, nothing is \
+             stopped. #{id} starts once they are done, then keeps the machine until it is released.",
+            "Rendre le ticket #{id} prioritaire ?\n\n{} — {}\n\nPlus aucun autre ticket n'est admis. Les tickets actifs \
+             reçoivent l'ordre de ne plus lancer de commande lourde (la garde les refuse) ; leur commande en cours \
+             finit, rien n'est arrêté. #{id} démarre quand ils ont fini, puis garde la machine jusqu'à sa libération.",
+            t.session,
+            t.description
+        );
+        let response = unsafe {
+            MessageBoxW(h, wide(&question).as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2)
+        };
+        if response != IDYES {
+            return;
+        }
+    }
+    let r = p.set_priority(id, !t.priority, &tr!("window", "fenêtre"));
+    if r.code != 200 {
+        let text = r.body["error"].as_str().unwrap_or_default().to_owned();
+        unsafe { MessageBoxW(h, wide(&text).as_ptr(), title.as_ptr(), MB_ICONWARNING) };
     }
 }
 
@@ -1142,54 +1356,37 @@ unsafe extern "system" fn procedure(h: HWND, msg: u32, wparam: WPARAM, lparam: L
                 });
                 1
             }
+            WM_VKEYTOITEM => {
+                let key = (wparam & 0xffff) as u32;
+                let control = GetKeyState(VK_CONTROL as i32) < 0;
+                if control && key == 'C' as u32 {
+                    let target = if lparam as HWND == LOG.with(Cell::get) { MENU_COPY_LINE } else { MENU_COPY_NUMBER };
+                    command(h, target);
+                    return -2;
+                }
+                -1
+            }
+            WM_CONTEXTMENU => {
+                let source = wparam as HWND;
+                if source == LIST.with(Cell::get) || source == LOG.with(Cell::get) {
+                    context_menu(h, source, lparam);
+                    return 0;
+                }
+                DefWindowProcW(h, msg, wparam, lparam)
+            }
             WM_COMMAND => {
                 let id = wparam & 0xffff;
                 let notification = (wparam >> 16) & 0xffff;
                 if id == ID_LIST && notification == LBN_SELCHANGE as usize {
-                    LOG_DETAIL.with(|l| *l.borrow_mut() = None);
                     update_buttons();
-                    return 0;
-                }
-                if id == ID_LOG && notification == LBN_SELCHANGE as usize {
-                    let i = SendMessageW(LOG.with(Cell::get), LB_GETCURSEL, 0, 0);
-                    if let Some(line) =
-                        LOG_LINES.with(|l| usize::try_from(i).ok().and_then(|i| l.borrow().get(i).cloned()))
-                    {
-                        LOG_DETAIL.with(|l| *l.borrow_mut() = Some(line.clone()));
-                        detail_text(line);
-                    }
                     return 0;
                 }
                 if notification != 0 {
                     return 0;
                 }
-                LOG_DETAIL.with(|l| *l.borrow_mut() = None);
-                match id {
-                    ID_CANCEL => {
-                        if let Some(id) = selection() {
-                            confirm(h, id, false);
-                        }
-                    }
-                    ID_FREE => {
-                        if let Some(id) = selection() {
-                            confirm(h, id, true);
-                        }
-                    }
-                    ID_FORCE => {
-                        if let Some(id) = selection() {
-                            confirm_force(h, id);
-                        }
-                    }
-                    ID_FREEZE => {
-                        let frozen = STATUS.with(|s| s.borrow().as_ref().is_some_and(|s| s.manual_freeze.is_some()));
-                        if let Some(p) = shared() {
-                            p.freeze(!frozen, &tr!("window", "fenêtre"));
-                        }
-                    }
-                    ID_LOG_BUTTON => ui::open_log(),
-                    _ => return 0,
+                if command(h, id) {
+                    refresh(h);
                 }
-                refresh(h);
                 0
             }
             WM_CLOSE => {
@@ -1203,8 +1400,6 @@ unsafe extern "system" fn procedure(h: HWND, msg: u32, wparam: WPARAM, lparam: L
                 FONTS.with(|f| *f.borrow_mut() = None);
                 STATUS.with(|s| *s.borrow_mut() = None);
                 LOG_LINES.with(|l| l.borrow_mut().clear());
-                DETAIL_TEXT.with(|l| l.borrow_mut().clear());
-                LOG_DETAIL.with(|l| *l.borrow_mut() = None);
                 0
             }
             _ => DefWindowProcW(h, msg, wparam, lparam),

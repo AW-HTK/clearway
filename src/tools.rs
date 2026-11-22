@@ -246,6 +246,11 @@ impl<C: Channel> Tools<C> {
             Value::Number(n) => n.as_f64().map(|g| (g * 1024.0).round() as u64),
             v => Some(parse_ram(v.as_str().unwrap_or("")).ok_or_else(|| tr!("unreadable `ram` (e.g. \"6G\")", "`ram` illisible (ex. « 6G »)"))?),
         };
+        let gpu_mb = match &arguments["gpu"] {
+            Value::Null => None,
+            Value::Number(n) => n.as_f64().map(|g| (g * 1024.0).round() as u64),
+            v => Some(parse_ram(v.as_str().unwrap_or("")).ok_or_else(|| tr!("unreadable `gpu` (e.g. \"6G\")", "`gpu` illisible (ex. « 6G »)"))?),
+        };
         let duration_s = match &arguments["duration"] {
             Value::Null => None,
             Value::Number(n) => n.as_u64().map(|m| m * 60),
@@ -269,6 +274,7 @@ impl<C: Channel> Tools<C> {
             ram_mb,
             cpu: arguments["cpu"].as_u64().map(|c| c as u32),
             duration_s,
+            gpu_mb,
             description: description.to_owned(),
             session: self.session.name.clone(),
             claude_session_id: self.session.claude_session_id.clone(),
@@ -386,6 +392,10 @@ impl<C: Channel> Provider for Tools<C> {
                     ) },
                     "ram": { "type": "string", "description": tr!("Peak RAM, e.g. \"6G\"", "RAM au pic, ex. « 6G »") },
                     "cpu": { "type": "integer", "description": tr!("Cores", "Cœurs") },
+                    "gpu": { "type": "string", "description": tr!(
+                        "Video memory on the dedicated graphics card, for a task using the GPU (CUDA, local AI model, render), e.g. \"6G\"",
+                        "Mémoire vidéo sur la carte graphique dédiée, pour une tâche qui utilise le GPU (CUDA, modèle d'IA local, rendu), ex. « 6G »"
+                    ) },
                     "duration": { "type": "string", "description": tr!("Expected duration, e.g. \"30m\" (the lease)", "Durée prévue, ex. « 30m » (le bail)") },
                     "dir": { "type": "string", "description": tr!(
                         "Absolute folder the heavy task runs in, when it is not the session's (a git worktree): the queue shows its branch",
@@ -424,15 +434,16 @@ impl<C: Channel> Provider for Tools<C> {
             json!({
                 "name": "resize",
                 "description": tr!(
-                    "Lowers the estimate of a waiting or active ticket (RAM, cores, duration) when the task needs less \
-                     than declared, so the queue moves on. Never raises: use extend or a new ticket.",
-                    "Baisse l'estimation d'un ticket en attente ou actif (RAM, cœurs, durée) quand la tâche demande moins \
-                     que prévu, pour que la file avance. Ne monte jamais : utilise extend ou un nouveau ticket."
+                    "Lowers the estimate of a waiting or active ticket (RAM, cores, video memory, duration) when the task \
+                     needs less than declared, so the queue moves on. Never raises: use extend or a new ticket.",
+                    "Baisse l'estimation d'un ticket en attente ou actif (RAM, cœurs, mémoire vidéo, durée) quand la tâche \
+                     demande moins que prévu, pour que la file avance. Ne monte jamais : utilise extend ou un nouveau ticket."
                 ),
                 "inputSchema": schema(json!({
                     "ticket": ticket,
                     "ram": { "type": "string", "description": tr!("New peak RAM, e.g. \"1G\"", "Nouvelle RAM au pic, ex. « 1G »") },
                     "cpu": { "type": "integer", "description": tr!("New number of cores", "Nouveau nombre de cœurs") },
+                    "gpu": { "type": "string", "description": tr!("New video memory, e.g. \"2G\"", "Nouvelle mémoire vidéo, ex. « 2G »") },
                     "duration": { "type": "string", "description": tr!("New total duration, e.g. \"20m\"", "Nouvelle durée totale, ex. « 20m »") },
                     "reason": { "type": "string" }
                 }), &["ticket"]),
@@ -479,9 +490,13 @@ impl<C: Channel> Provider for Tools<C> {
                     }
                     None => None,
                 };
+                let gpu_mb = match arguments["gpu"].as_str() {
+                    Some(v) => Some(parse_ram(v).ok_or_else(|| tr!("unreadable `gpu` (e.g. \"2G\")", "`gpu` illisible (ex. « 2G »)"))?),
+                    None => None,
+                };
                 let cpu = arguments["cpu"].as_u64().map(|c| c.min(u32::MAX as u64) as u32);
                 let reason = arguments["reason"].as_str().unwrap_or("").to_owned();
-                let body = Resize { ram_mb, cpu, duration_s, reason };
+                let body = Resize { ram_mb, cpu, duration_s, gpu_mb, reason };
                 Ok(self.simple("POST", format!("/tickets/{id}/resize"), serde_json::to_value(body).map_err(|e| e.to_string())?))
             }
             "cancel" => {

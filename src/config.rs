@@ -18,6 +18,10 @@ pub struct Config {
     pub margin_ram_windows_mb: u64,
     pub margin_ram_wsl_mb: u64,
     pub margin_cpu: u32,
+    /// GPU margin, in percent of the card's video memory.
+    pub margin_gpu_pct: u64,
+    /// Part of the name of the dedicated card the GPU reserve stands for; empty: the one with the most video memory.
+    pub gpu_adapter: String,
     pub default_wsl: Need,
     pub default_windows: Need,
     pub unattended_delay_s: u64,
@@ -51,8 +55,10 @@ impl Default for Config {
             margin_ram_windows_mb: 1536,
             margin_ram_wsl_mb: 1536,
             margin_cpu: 2,
-            default_wsl: Need { ram_mb: 2048, cpu: 2, duration_s: 15 * 60 },
-            default_windows: Need { ram_mb: 4096, cpu: 4, duration_s: 30 * 60 },
+            margin_gpu_pct: 20,
+            gpu_adapter: String::new(),
+            default_wsl: Need { ram_mb: 2048, cpu: 2, duration_s: 15 * 60, gpu_mb: 0 },
+            default_windows: Need { ram_mb: 4096, cpu: 4, duration_s: 30 * 60, gpu_mb: 0 },
             unattended_delay_s: 90,
             absence_delay_s: 15 * 60,
             recall_delay_s: 120,
@@ -165,6 +171,14 @@ impl Config {
                 "margin.ram_windows" => c.margin_ram_windows_mb = ram()?,
                 "margin.ram_wsl" => c.margin_ram_wsl_mb = ram()?,
                 "margin.cpu" => c.margin_cpu = integer()?,
+                "margin.gpu" => {
+                    let pct = integer()?;
+                    if pct >= 100 {
+                        return Err(error(tr!("margin.gpu: percent under 100", "margin.gpu : pourcentage sous 100")));
+                    }
+                    c.margin_gpu_pct = pct.into();
+                }
+                "gpu.adapter" => c.gpu_adapter = value.to_owned(),
                 "default.wsl.ram" => c.default_wsl.ram_mb = ram()?,
                 "default.wsl.cpu" => c.default_wsl.cpu = integer()?,
                 "default.wsl.duration" => c.default_wsl.duration_s = seconds()?,
@@ -238,6 +252,12 @@ cpu.total = {cpu_total}
 margin.ram_windows = "{margin_ram_windows}"
 margin.ram_wsl = "{margin_ram_wsl}"
 margin.cpu = {margin_cpu}
+# Percent of the graphics card's video memory kept free.
+margin.gpu = {margin_gpu}
+
+# Dedicated graphics card for --gpu requests: part of its name (e.g. "RTX 3060"); empty: the one with the most video
+# memory. Integrated GPUs are ignored.
+gpu.adapter = "{gpu_adapter}"
 
 # Needs used when a request gives no --ram, --cpu or --duration.
 {default_wsl}{default_windows}
@@ -284,6 +304,8 @@ update.check = "{update_check}"
             margin_ram_windows = ram_option(self.margin_ram_windows_mb as i64),
             margin_ram_wsl = ram_option(self.margin_ram_wsl_mb as i64),
             margin_cpu = self.margin_cpu,
+            margin_gpu = self.margin_gpu_pct,
+            gpu_adapter = self.gpu_adapter,
             default_wsl = need(&self.default_wsl, "wsl"),
             default_windows = need(&self.default_windows, "windows"),
             unattended = duration_option(self.unattended_delay_s),
@@ -346,7 +368,14 @@ mod tests {
     #[test]
     fn template_gives_back_defaults() {
         assert_eq!(Config::read(&Config::default().render()).unwrap(), Config::default());
-        let mut c = Config { cpu_total_windows: Some(12), language: Some(Lang::Fr), legacy_pipe: false, ..Config::default() };
+        let mut c = Config {
+            cpu_total_windows: Some(12),
+            language: Some(Lang::Fr),
+            legacy_pipe: false,
+            margin_gpu_pct: 30,
+            gpu_adapter: "RTX".into(),
+            ..Config::default()
+        };
         c.default_wsl.duration_s = 90;
         assert_eq!(Config::read(&c.render()).unwrap(), c);
     }
@@ -362,6 +391,9 @@ mod tests {
         assert!(Config::read("margin.cpu = two").is_err());
         assert!(Config::read("pipe = \"a b\"").is_err());
         assert!(Config::read("legacy_pipe = maybe").is_err());
+        let c = Config::read("margin.gpu = 25\ngpu.adapter = \"RTX 3060\"\n").unwrap();
+        assert_eq!((c.margin_gpu_pct, c.gpu_adapter.as_str()), (25, "RTX 3060"));
+        assert!(Config::read("margin.gpu = 100").is_err());
     }
 
     #[test]

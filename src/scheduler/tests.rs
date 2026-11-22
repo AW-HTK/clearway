@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::Vmmem;
+use crate::model::{Gpu, Vmmem};
 
 const H: u64 = 1_800_000_000;
 
@@ -33,6 +33,7 @@ fn measures(ram_windows_avail_gb: f64, wsl_avail_gb: f64, vmmem_gb: f64) -> Meas
             busy_cores: None,
             at: H,
         }),
+        gpus: Vec::new(),
     }
 }
 
@@ -52,7 +53,7 @@ fn ticket(id: u64, side: Side, ram_gb: f64, cpu: u32, duration_min: u64) -> Tick
         id,
         request_id: format!("r{id}"),
         side,
-        need: Need { ram_mb: (ram_gb * 1024.0) as u64, cpu, duration_s: duration_min * 60 },
+        need: Need { ram_mb: (ram_gb * 1024.0) as u64, cpu, duration_s: duration_min * 60, gpu_mb: 0 },
         description: format!("task {id}"),
         session: "test".into(),
         claude_session_id: None,
@@ -75,6 +76,7 @@ fn ticket(id: u64, side: Side, ram_gb: f64, cpu: u32, duration_min: u64) -> Tick
         base_ram_windows_mb: None,
         base_ram_wsl_mb: None,
         base_vmmem_mb: None,
+        base_gpu_mb: None,
         overtakes: 0,
         link: None,
         identity: None,
@@ -252,26 +254,26 @@ fn anti_starvation_ignores_unrelated_resources() {
 fn immediate_refusal_of_impossible_needs() {
     let c = config();
     let m = large();
-    let r = refusal(Side::Wsl, &Need { ram_mb: 11 * 1024, cpu: 2, duration_s: 60 }, &m, &c).unwrap();
+    let r = refusal(Side::Wsl, &Need { ram_mb: 11 * 1024, cpu: 2, duration_s: 60, gpu_mb: 0 }, &m, &c).unwrap();
     assert_eq!(r.decision, DecisionKind::Refused);
     assert_eq!(r.reserve.as_deref(), Some("ram_wsl"));
     assert!(r.message.contains("RAM WSL impossible"), "{}", r.message);
     assert!(r.message.contains("--ram à 10.5G max"), "{}", r.message);
 
     // WSL: beyond 10 − 2 cores, admitted as exclusive; refused only beyond 10.
-    assert!(refusal(Side::Wsl, &Need { ram_mb: 2048, cpu: 10, duration_s: 60 }, &m, &c).is_none());
-    let r = refusal(Side::Wsl, &Need { ram_mb: 2048, cpu: 11, duration_s: 60 }, &m, &c).unwrap();
+    assert!(refusal(Side::Wsl, &Need { ram_mb: 2048, cpu: 10, duration_s: 60, gpu_mb: 0 }, &m, &c).is_none());
+    let r = refusal(Side::Wsl, &Need { ram_mb: 2048, cpu: 11, duration_s: 60, gpu_mb: 0 }, &m, &c).unwrap();
     assert_eq!(r.reserve.as_deref(), Some("cpu"));
     assert!(r.message.contains("--cpu à 10 max"), "{}", r.message);
     // Windows: its own budget of 16 logical cores.
-    assert!(refusal(Side::Windows, &Need { ram_mb: 2048, cpu: 11, duration_s: 60 }, &m, &c).is_none());
-    let r = refusal(Side::Windows, &Need { ram_mb: 2048, cpu: 17, duration_s: 60 }, &m, &c).unwrap();
+    assert!(refusal(Side::Windows, &Need { ram_mb: 2048, cpu: 11, duration_s: 60, gpu_mb: 0 }, &m, &c).is_none());
+    let r = refusal(Side::Windows, &Need { ram_mb: 2048, cpu: 17, duration_s: 60, gpu_mb: 0 }, &m, &c).unwrap();
     assert_eq!(r.reserve.as_deref(), Some("cpu_windows"));
     assert!(r.message.contains("--cpu à 16 max"), "{}", r.message);
 
     // 11 GB on Windows fit in 32 − 4 GB: WSL RAM does not count for a Windows task.
-    assert!(refusal(Side::Windows, &Need { ram_mb: 11 * 1024, cpu: 2, duration_s: 60 }, &m, &c).is_none());
-    assert!(refusal(Side::Windows, &Need { ram_mb: 29 * 1024, cpu: 2, duration_s: 60 }, &m, &c).is_some());
+    assert!(refusal(Side::Windows, &Need { ram_mb: 11 * 1024, cpu: 2, duration_s: 60, gpu_mb: 0 }, &m, &c).is_none());
+    assert!(refusal(Side::Windows, &Need { ram_mb: 29 * 1024, cpu: 2, duration_s: 60, gpu_mb: 0 }, &m, &c).is_some());
 }
 
 #[test]
@@ -624,7 +626,7 @@ fn real_case_11_05_wsl_ticket_of_3_gb() {
 #[test]
 fn windows_debit_of_a_wsl_ticket() {
     let c = Config::default();
-    let b = Need { ram_mb: 3072, cpu: 2, duration_s: 60 };
+    let b = Need { ram_mb: 3072, cpu: 2, duration_s: 60, gpu_mb: 0 };
     assert_eq!(debit(Reserve::RamWindows, Side::Wsl, &b, &measures(20.0, 8.0, 4.0), &c), 3072);
     assert_eq!(debit(Reserve::RamWindows, Side::Wsl, &b, &measures(20.0, 8.0, 11.0), &c), 1024);
     assert_eq!(debit(Reserve::RamWindows, Side::Wsl, &b, &measures(20.0, 8.0, 12.5), &c), 0);
@@ -736,7 +738,7 @@ fn evening_of_11_04() {
 
     // #3 (targeted Infection, 1 GB, 1 core) occupies WSL; #4 (back.sh then Infection --threads=max, 10 cores)
     // arrives at 23:35: admitted, but only when alone on WSL.
-    assert!(refusal(Side::Wsl, &Need { ram_mb: 3072, cpu: 10, duration_s: 45 * 60 }, &m, &c).is_none());
+    assert!(refusal(Side::Wsl, &Need { ram_mb: 3072, cpu: 10, duration_s: 45 * 60, gpu_mb: 0 }, &m, &c).is_none());
     let t3 = active(ticket(3, Side::Wsl, 1.0, 1, 15), t23_35 - 2 * 60, 6.0);
     let mut t4 = ticket(4, Side::Wsl, 3.0, 10, 45);
     t4.created = t23_35;
@@ -1133,9 +1135,9 @@ fn exclusive_goes_when_the_measured_load_allows() {
 #[test]
 fn resize_only_lowers() {
     let t = active(ticket(7, Side::Wsl, 2.0, 2, 30), H, 8.0);
-    let lower = |ram_mb, cpu, duration_s| lowered(&t, &Resize { ram_mb, cpu, duration_s, reason: String::new() }, H + 600);
-    assert_eq!(lower(None, Some(1), None), Ok(Need { ram_mb: 2048, cpu: 1, duration_s: 1800 }));
-    assert_eq!(lower(Some(1024), None, Some(1200)), Ok(Need { ram_mb: 1024, cpu: 2, duration_s: 1200 }));
+    let lower = |ram_mb, cpu, duration_s| lowered(&t, &Resize { ram_mb, cpu, duration_s, ..Resize::default() }, H + 600);
+    assert_eq!(lower(None, Some(1), None), Ok(Need { ram_mb: 2048, cpu: 1, duration_s: 1800, gpu_mb: 0 }));
+    assert_eq!(lower(Some(1024), None, Some(1200)), Ok(Need { ram_mb: 1024, cpu: 2, duration_s: 1200, gpu_mb: 0 }));
     assert!(lower(None, None, None).is_err());
     assert!(lower(None, Some(0), None).is_err());
     assert!(lower(None, Some(3), None).unwrap_err().contains("extend"));
@@ -1143,7 +1145,7 @@ fn resize_only_lowers() {
     assert!(lower(None, None, Some(600)).unwrap_err().contains("10 min"));
     let waiting = ticket(8, Side::Wsl, 2.0, 2, 30);
     let r = lowered(&waiting, &Resize { duration_s: Some(60), ..Resize::default() }, H + 600);
-    assert_eq!(r, Ok(Need { ram_mb: 2048, cpu: 2, duration_s: 60 }));
+    assert_eq!(r, Ok(Need { ram_mb: 2048, cpu: 2, duration_s: 60, gpu_mb: 0 }));
 }
 
 #[test]
@@ -1155,4 +1157,97 @@ fn lowering_an_active_ticket_clears_the_next() {
     t.need = lowered(t, &Resize { cpu: Some(2), ..Resize::default() }, H + 60).unwrap();
     let p = schedule(&e, &large(), &config(), H + 60);
     assert_eq!(p.events, vec![Event::Cleared(2)]);
+}
+
+#[test]
+fn priority_ticket_stops_admissions_and_starts_after_the_active_ones() {
+    let c = config();
+    let mut e = present(
+        state(vec![active(ticket(1, Side::Wsl, 1.0, 2, 30), H - 600, 8.0), ticket(2, Side::Wsl, 1.0, 1, 5), ticket(3, Side::Wsl, 1.0, 1, 5)]),
+        H,
+    );
+    e.priority = Some(3);
+    let p = schedule(&e, &large(), &c, H);
+    assert!(p.events.is_empty(), "nothing goes while #1 runs: {:?}", p.events);
+    assert_eq!(p.reasons[&3].reserve.as_deref(), Some("priority"));
+    assert_eq!((p.reasons[&3].position, p.reasons[&3].blockers.clone()), (Some(1), vec![1]));
+    assert_eq!((p.reasons[&2].reserve.as_deref(), p.reasons[&2].position), (Some("priority"), Some(2)));
+    assert!(p.reasons[&1].message.contains("Pause"), "{}", p.reasons[&1].message);
+    assert!(p.freeze_texts.iter().any(|f| f.contains("#3")));
+
+    e.tickets.retain(|t| t.id != 1);
+    let p = schedule(&e, &large(), &c, H);
+    assert_eq!(p.events, vec![Event::Cleared(3)]);
+    assert!(p.reasons[&3].message.contains("prioritaire"));
+    let p = schedule(&present(p.state, H + 60), &large(), &c, H + 60);
+    assert!(p.events.is_empty(), "#2 still waits while #3 runs");
+    assert_eq!(p.reasons[&2].blockers, vec![3]);
+
+    let mut e = p.state;
+    e.tickets.retain(|t| t.id != 3);
+    let p = schedule(&e, &large(), &c, H + 120);
+    assert_eq!((p.state.priority, p.persist), (None, true), "the priority goes with its ticket");
+    assert_eq!(p.events, vec![Event::Cleared(2)]);
+}
+
+#[test]
+fn priority_is_set_replaced_and_removed() {
+    let e = state(vec![ticket(1, Side::Wsl, 1.0, 1, 5), ticket(2, Side::Wsl, 1.0, 1, 5)]);
+    let (e, _) = set_priority(&e, 1, true).unwrap();
+    assert!(set_priority(&e, 1, true).is_err());
+    let (e, message) = set_priority(&e, 2, true).unwrap();
+    assert_eq!(e.priority, Some(2));
+    assert!(message.contains("#1"), "{message}");
+    assert!(set_priority(&e, 1, false).is_err());
+    assert!(set_priority(&e, 9, true).is_err());
+    assert_eq!(set_priority(&e, 2, false).unwrap().0.priority, None);
+}
+
+fn with_gpu(mut m: Measures, used_gb: f64) -> Measures {
+    m.gpus = vec![
+        Gpu { luid: "luid_0x0_0x1".into(), name: "NVIDIA GeForce RTX 3060".into(), vram_total_mb: 12 * 1024, vram_used_mb: Some((used_gb * 1024.0) as u64), busy_pct: Some(4.0) },
+        Gpu { luid: "luid_0x0_0x2".into(), name: "Small card".into(), vram_total_mb: 2 * 1024, vram_used_mb: Some(0), busy_pct: None },
+    ];
+    m
+}
+
+fn gpu_ticket(id: u64, gpu_gb: f64) -> Ticket {
+    let mut t = ticket(id, Side::Wsl, 1.0, 1, 30);
+    t.need.gpu_mb = (gpu_gb * 1024.0) as u64;
+    t
+}
+
+#[test]
+fn gpu_reserve_takes_the_largest_card_with_a_20_percent_margin() {
+    let c = config();
+    let m = with_gpu(large(), 2.0);
+    let lev = levels(&state(vec![]), &m, &c, H);
+    let g = &lev[Reserve::Gpu.i()];
+    assert_eq!((g.available, g.margin), (10 * 1024, 12 * 1024 * 20 / 100));
+
+    let e = present(state(vec![gpu_ticket(1, 6.0), gpu_ticket(2, 4.0), ticket(3, Side::Wsl, 1.0, 1, 5)]), H);
+    let p = schedule(&e, &m, &c, H);
+    assert_eq!(p.events, vec![Event::Cleared(1), Event::Cleared(3)], "#3 needs no GPU and goes ahead of #2");
+    assert_eq!(p.reasons[&2].reserve.as_deref(), Some("gpu"));
+    assert!(p.reasons[&2].message.contains("--gpu"), "{}", p.reasons[&2].message);
+
+    // After the ramp-up, the video memory #1 already took is in the measure, not in its reservation.
+    let later = H + c.rampup_delay_s + 10;
+    let p = schedule(&present(p.state, later), &with_gpu(large(), 8.0), &c, later);
+    assert_eq!(levels(&p.state, &with_gpu(large(), 8.0), &c, later)[Reserve::Gpu.i()].reserve, 0);
+
+    let c = Config { gpu_adapter: "small".into(), ..config() };
+    assert_eq!(levels(&state(vec![]), &m, &c, H)[Reserve::Gpu.i()].available, 2 * 1024);
+}
+
+#[test]
+fn gpu_request_refused_without_a_card_or_beyond_its_capacity() {
+    let c = config();
+    let need = Need { ram_mb: 1024, cpu: 1, duration_s: 60, gpu_mb: 10 * 1024 };
+    assert!(refusal(Side::Wsl, &need, &with_gpu(large(), 0.0), &c).unwrap().message.contains("--gpu"));
+    let need = Need { gpu_mb: 4 * 1024, ..need };
+    assert!(refusal(Side::Wsl, &need, &with_gpu(large(), 0.0), &c).is_none());
+    assert!(refusal(Side::Wsl, &need, &large(), &c).unwrap().message.contains("aucune n'a été trouvée"));
+    let c = Config { gpu_adapter: "radeon".into(), ..config() };
+    assert!(refusal(Side::Wsl, &need, &with_gpu(large(), 0.0), &c).unwrap().message.contains("radeon"));
 }

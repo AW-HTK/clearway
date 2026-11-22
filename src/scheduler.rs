@@ -79,15 +79,17 @@ fn update_swap_pressure(e: &mut State, m: &Measures, c: &Config, now: u64) {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Grouped by side: Windows first, then WSL. The order is the display order everywhere.
+/// Grouped by side: Windows first, then WSL, then the graphics card. The order is the display order everywhere.
 pub enum Reserve {
     RamWindows,
     CpuWindows,
     RamWsl,
     Cpu,
+    /// Video memory of the dedicated card, shared by both sides (CUDA in WSL runs on the Windows card).
+    Gpu,
 }
 
-pub const RESERVES: [Reserve; 4] = [Reserve::RamWindows, Reserve::CpuWindows, Reserve::RamWsl, Reserve::Cpu];
+pub const RESERVES: [Reserve; 5] = [Reserve::RamWindows, Reserve::CpuWindows, Reserve::RamWsl, Reserve::Cpu, Reserve::Gpu];
 pub const RESERVE_COUNT: usize = RESERVES.len();
 
 impl Reserve {
@@ -97,6 +99,7 @@ impl Reserve {
             Reserve::RamWsl => "ram_wsl",
             Reserve::Cpu => "cpu",
             Reserve::CpuWindows => "cpu_windows",
+            Reserve::Gpu => "gpu",
         }
     }
 
@@ -110,12 +113,13 @@ impl Reserve {
             (Reserve::RamWsl, Lang::Fr) => "RAM WSL",
             (Reserve::Cpu, Lang::Fr) => "CPU WSL",
             (Reserve::CpuWindows, Lang::Fr) => "CPU Windows",
+            (Reserve::Gpu, _) => "GPU",
         }
     }
 
     fn insufficient(self) -> String {
         match self {
-            Reserve::Cpu | Reserve::CpuWindows => tr!("insufficient", "insuffisant"),
+            Reserve::Cpu | Reserve::CpuWindows | Reserve::Gpu => tr!("insufficient", "insuffisant"),
             _ => tr!("insufficient", "insuffisante"),
         }
     }
@@ -128,6 +132,11 @@ impl Reserve {
         matches!(self, Reserve::RamWindows | Reserve::RamWsl)
     }
 
+    /// Counted in megabytes (RAM, video memory) rather than in cores.
+    pub fn is_memory(self) -> bool {
+        self.is_ram() || self == Reserve::Gpu
+    }
+
     /// Every task debits Windows RAM and CPU (the VM's vCPUs run on the host); only `wsl` tasks debit WSL RAM and CPU.
     pub fn need(self, side: Side, b: &Need) -> i64 {
         match self {
@@ -136,11 +145,12 @@ impl Reserve {
             Reserve::Cpu if side == Side::Wsl => b.cpu as i64,
             Reserve::RamWsl | Reserve::Cpu => 0,
             Reserve::CpuWindows => b.cpu as i64,
+            Reserve::Gpu => b.gpu_mb as i64,
         }
     }
 
     pub fn amount(self, v: i64) -> String {
-        if self.is_ram() { gb(v) } else { cores(v) }
+        if self.is_memory() { gb(v) } else { cores(v) }
     }
 }
 
@@ -236,6 +246,7 @@ pub fn available(r: Reserve, m: &Measures, c: &Config, now: u64) -> i64 {
         },
         Reserve::Cpu => c.cpu_total as i64,
         Reserve::CpuWindows => windows_cores(m, c),
+        Reserve::Gpu => m.gpu(&c.gpu_adapter).map_or(0, |g| g.vram_total_mb.saturating_sub(g.vram_used_mb.unwrap_or(0)) as i64),
     }
 }
 
@@ -244,11 +255,12 @@ pub fn windows_cores(m: &Measures, c: &Config) -> i64 {
     c.cpu_total_windows.map(i64::from).unwrap_or(if m.windows_cores > 0 { m.windows_cores as i64 } else { 16 })
 }
 
-fn margin(r: Reserve, c: &Config) -> i64 {
+fn margin(r: Reserve, m: &Measures, c: &Config) -> i64 {
     match r {
         Reserve::RamWindows => c.margin_ram_windows_mb as i64,
         Reserve::RamWsl => c.margin_ram_wsl_mb as i64,
         Reserve::Cpu | Reserve::CpuWindows => c.margin_cpu as i64,
+        Reserve::Gpu => total(r, m, c) * c.margin_gpu_pct as i64 / 100,
     }
 }
 
@@ -272,10 +284,10 @@ pub fn reservation(e: &State, t: &Ticket, r: Reserve, m: &Measures, c: &Config, 
 
 /// [`reservation`] of the debit `b`.
 fn reservation_of(e: &State, t: &Ticket, r: Reserve, b: i64, m: &Measures, c: &Config, now: u64) -> i64 {
-    if b == 0|| t.state != TicketState::Active || ramping_up(t, c, now) {
+    if b == 0 || t.state != TicketState::Active || ramping_up(t, c, now) {
         return b;
     }
-    if !r.is_ram() {
+    if !r.is_memory() {
         let Some(used) = cpu_used_cores(r, m, c, now) else {
             return b;
         };
@@ -304,6 +316,7 @@ fn reservation_of(e: &State, t: &Ticket, r: Reserve, b: i64, m: &Measures, c: &C
         }
         (Reserve::RamWindows, _) => base_windows.map(|base| base - m.ram_avail_mb as i64),
         (Reserve::RamWsl, _) => wsl_drop,
+        (Reserve::Gpu, _) => t.base_gpu_mb.map(|base| base - available(Reserve::Gpu, m, c, now)),
         _ => None,
     };
     match risen {
@@ -314,7 +327,7 @@ fn reservation_of(e: &State, t: &Ticket, r: Reserve, b: i64, m: &Measures, c: &C
 
 pub fn levels(e: &State, m: &Measures, c: &Config, now: u64) -> [Level; RESERVE_COUNT] {
     RESERVES.map(|r| {
-        let mut n = Level { available: available(r, m, c, now), margin: margin(r, c), ..Level::default() };
+        let mut n = Level { available: available(r, m, c, now), margin: margin(r, m, c), ..Level::default() };
         let shared = r == Reserve::RamWindows;
         let mut wsl_holders = Vec::new();
         for t in e.tickets.iter().filter(|t| t.state != TicketState::Waiting) {
@@ -359,7 +372,11 @@ pub fn reserve_views(e: &State, m: &Measures, c: &Config, now: u64) -> Vec<Reser
                 reserve: n.reserve,
                 margin: n.margin,
                 free: n.free(),
-                used_pct: cpu_used_pct(r, m, c, now).map(|p| p.round() as u32),
+                used_pct: match r {
+                    Reserve::Gpu => m.gpu(&c.gpu_adapter).and_then(|g| g.busy_pct).map(|p| p.round() as u32),
+                    _ => cpu_used_pct(r, m, c, now).map(|p| p.round() as u32),
+                },
+                card: (r == Reserve::Gpu).then(|| m.gpu(&c.gpu_adapter).map(|g| g.luid.clone())).flatten(),
                 exclusive: (r == Reserve::Cpu)
                     .then(|| {
                         e.tickets.iter().find(|t| {
@@ -383,6 +400,7 @@ fn total(r: Reserve, m: &Measures, c: &Config) -> i64 {
         Reserve::RamWsl => c.wsl_ram_max_mb as i64,
         Reserve::Cpu => c.cpu_total as i64,
         Reserve::CpuWindows => windows_cores(m, c),
+        Reserve::Gpu => m.gpu(&c.gpu_adapter).map_or(0, |g| g.vram_total_mb as i64),
     }
 }
 
@@ -391,20 +409,43 @@ pub fn refusal(side: Side, b: &Need, m: &Measures, c: &Config) -> Option<Reason>
     for r in RESERVES {
         let need = r.need(side, b);
         let tot = total(r, m, c);
+        if r == Reserve::Gpu && need > 0 && tot == 0 {
+            let mut reason = Reason::simple(
+                DecisionKind::Refused,
+                if m.gpus.is_empty() {
+                    tr!(
+                        "Refused: --gpu needs a dedicated graphics card, and none was found (integrated GPUs are ignored).",
+                        "Refusé : --gpu demande une carte graphique dédiée, et aucune n'a été trouvée (les GPU intégrés sont ignorés)."
+                    )
+                } else {
+                    tr!(
+                        "Refused: no dedicated graphics card matches gpu.adapter = \"{}\" in config.toml.",
+                        "Refusé : aucune carte graphique dédiée ne correspond à gpu.adapter = « {} » dans config.toml.",
+                        c.gpu_adapter
+                    )
+                },
+            );
+            reason.reserve = Some(r.key().into());
+            reason.need = Some(need);
+            reason.available = Some(0);
+            return Some(reason);
+        }
         if need == 0 || tot == 0 {
             continue;
         }
         // Beyond capacity − margin, a CPU request is still admitted, but alone (see `exclusive`).
-        let capacity = if r.is_ram() { tot - margin(r, c) } else { tot };
+        let capacity = if r.is_memory() { tot - margin(r, m, c) } else { tot };
         if need > capacity {
-            let suggestion = if r.is_ram() {
+            let suggestion = if r == Reserve::Gpu {
+                tr!("Lower --gpu to {} max.", "Baisse --gpu à {} max.", ram_option(capacity))
+            } else if r.is_ram() {
                 tr!("Lower --ram to {} max.", "Baisse --ram à {} max.", ram_option(capacity))
             } else {
                 tr!("Lower --cpu to {} max.", "Baisse --cpu à {} max.", capacity.max(1))
             };
             let mut reason = Reason::simple(
                 DecisionKind::Refused,
-                if r.is_ram() {
+                if r.is_memory() {
                     tr!(
                         "Refused: {} cannot fit (need {}, maximum capacity {} = {} − margin {}). {suggestion}",
                         "Refusé : {} impossible (besoin {}, capacité maximale {} = {} − marge {}). {suggestion}",
@@ -412,7 +453,7 @@ pub fn refusal(side: Side, b: &Need, m: &Measures, c: &Config) -> Option<Reason>
                         r.amount(need),
                         r.amount(capacity),
                         r.amount(tot),
-                        r.amount(margin(r, c))
+                        r.amount(margin(r, m, c))
                     )
                 } else {
                     tr!(
@@ -426,7 +467,7 @@ pub fn refusal(side: Side, b: &Need, m: &Measures, c: &Config) -> Option<Reason>
             reason.reserve = Some(r.key().into());
             reason.need = Some(need);
             reason.available = Some(capacity);
-            reason.margin = Some(margin(r, c));
+            reason.margin = Some(margin(r, m, c));
             return Some(reason);
         }
     }
@@ -538,6 +579,7 @@ fn grant(
     tm.base_ram_windows_mb = Some(lev[Reserve::RamWindows.i()].available);
     tm.base_ram_wsl_mb = Some(lev[Reserve::RamWsl.i()].available);
     tm.base_vmmem_mb = m.vmmem.map(|v| v.rss_mb);
+    tm.base_gpu_mb = Some(lev[Reserve::Gpu.i()].available);
     tm.acked = false;
     tm.lease_overrun = false;
     tm.orphan_cause = None;
@@ -660,11 +702,16 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
         !events.contains(&Event::Expired(t.id))
             && !events.contains(&Event::Freed(t.id, FreeReason::SessionClosed))
     });
+    if e.priority.is_some_and(|p| e.ticket(p).is_none()) {
+        e.priority = None;
+        persist = true;
+    }
+    let priority = e.priority;
 
     update_swap_pressure(&mut e, m, c, now);
     update_cpu_pressure(&mut e, m, c, now);
     let mut lev = levels(&e, m, c, now);
-    let mut freezes: [Option<Frozen>; RESERVE_COUNT] = [None, None, None, None];
+    let mut freezes: [Option<Frozen>; RESERVE_COUNT] = std::array::from_fn(|_| None);
     let mut pressure = Vec::new();
     for r in [Reserve::RamWindows, Reserve::RamWsl] {
         // The 12 GB − vmmemWSL fallback counts the page cache: not enough to declare pressure.
@@ -756,11 +803,35 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
     });
 
     let mut reasons = BTreeMap::new();
-    let waiting_ids: Vec<u64> = e.tickets.iter().filter(|t| t.state == TicketState::Waiting).map(|t| t.id).collect();
+    let mut waiting_ids: Vec<u64> = e.tickets.iter().filter(|t| t.state == TicketState::Waiting).map(|t| t.id).collect();
+    // The priority ticket heads the queue.
+    waiting_ids.sort_by_key(|&id| Some(id) != priority);
     let mut head: Option<Head> = None;
     let mut position = 0;
     for id in waiting_ids {
         let t = e.ticket(id).expect("waiting ticket present").clone();
+        if let Some(p) = priority.filter(|&p| p != id) {
+            position += 1;
+            let until = if e.ticket(p).is_some_and(|pt| pt.state == TicketState::Waiting) {
+                tr!("it starts once the active tickets are done, then", "il démarre après les tickets actifs, puis")
+            } else {
+                tr!("it is running;", "il tourne ;")
+            };
+            let mut r = Reason::simple(
+                DecisionKind::Frozen,
+                tr!(
+                    "#{id} waiting, position {position}: admissions reserved for priority ticket #{p} ({until} nothing else \
+                     goes until it is released). Lifted by: release of #{p} or \"Remove priority\" in the window.",
+                    "#{id} en attente, position {position} : admissions réservées au ticket prioritaire #{p} ({until} rien \
+                     d'autre ne passe jusqu'à sa libération). Levée : libération du #{p} ou « Retirer la priorité » dans la fenêtre."
+                ),
+            );
+            r.position = Some(position);
+            r.reserve = Some("priority".into());
+            r.blockers = vec![p];
+            reasons.insert(id, r);
+            continue;
+        }
         let silence = now.saturating_sub(seen(&t));
         if t.lost.is_some() || t.recalled.is_some() || (t.listeners == 0 && silence > c.unattended_delay_s) {
             position += 1;
@@ -795,6 +866,44 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
             continue;
         }
         let needs = needs_of(&t, &lev, m, c);
+        if priority == Some(id) {
+            position += 1;
+            let running: Vec<&Ticket> = e.tickets.iter().filter(|a| a.state != TicketState::Waiting).collect();
+            if running.is_empty() {
+                let free_at_grant = grant(&mut e, &mut lev, &t, &needs, m, now);
+                events.push(Event::Cleared(id));
+                reasons.insert(
+                    id,
+                    Reason::simple(
+                        DecisionKind::Cleared,
+                        tr!(
+                            "#{id}: cleared, priority ticket: the machine is its own until it is released. Free at clearance: {free_at_grant}.",
+                            "#{id} : feu vert, ticket prioritaire : la machine lui est réservée jusqu'à sa libération. Libre à l'accord : {free_at_grant}."
+                        ),
+                    ),
+                );
+                continue;
+            }
+            let ids: Vec<u64> = running.iter().map(|a| a.id).collect();
+            let end = running.iter().map(|a| a.planned_end()).collect::<Option<Vec<u64>>>().and_then(|f| f.into_iter().max());
+            let at = end.map_or(String::new(), |f| tr!(", expected around {}", ", prévue vers {}", hhmm(f)));
+            let mut r = Reason::simple(
+                DecisionKind::Waiting,
+                tr!(
+                    "#{id} waiting, position {position}: priority ticket, starts when {} end{at}. They were asked to \
+                     start no new heavy command; no other admission meanwhile.",
+                    "#{id} en attente, position {position} : ticket prioritaire, démarre à la fin de {}{at}. Ils ont reçu \
+                     l'ordre de ne plus lancer de commande lourde ; aucune autre admission d'ici là.",
+                    list(&ids)
+                ),
+            );
+            r.position = Some(position);
+            r.reserve = Some("priority".into());
+            r.blockers = ids;
+            r.unblocked_at = end;
+            reasons.insert(id, r);
+            continue;
+        }
         let exclusive = needs[Reserve::Cpu.i()] > c.cpu_total as i64 - c.margin_cpu as i64;
         let other_wsl: Vec<&Ticket> =
             e.tickets.iter().filter(|a| a.state != TicketState::Waiting && a.side == Side::Wsl).collect();
@@ -1074,13 +1183,21 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
                     )
                 };
                 let force = if t.force { tr!(" (forced by hand)", " (forcé à la main)") } else { String::new() };
+                let pause = match priority {
+                    Some(p) if p == id => tr!(
+                        " Priority ticket: no other admission until it is released.",
+                        " Ticket prioritaire : aucune autre admission jusqu'à sa libération."
+                    ),
+                    Some(p) => pause_order(id, p),
+                    None => String::new(),
+                };
                 reasons.insert(
                     id,
                     Reason::simple(
                         DecisionKind::Active,
                         tr!(
-                            "#{id} active{force} since {}, expected end around {}.{rampup}{rest}",
-                            "#{id} actif{force} depuis {}, fin prévue vers {}.{rampup}{rest}",
+                            "#{id} active{force} since {}, expected end around {}.{pause}{rampup}{rest}",
+                            "#{id} actif{force} depuis {}, fin prévue vers {}.{pause}{rampup}{rest}",
                             hhmm(granted),
                             hhmm(end)
                         ),
@@ -1125,6 +1242,14 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
     }
 
     let mut freeze_texts: Vec<String> = Vec::new();
+    if let Some(p) = priority {
+        freeze_texts.push(tr!(
+            "Priority ticket #{p}: no other admission until it is released; the active tickets finish their current \
+             command and start no new one.",
+            "Ticket prioritaire #{p} : aucune autre admission jusqu'à sa libération ; les tickets actifs finissent leur \
+             commande en cours sans en lancer d'autre."
+        ));
+    }
     for g in manual_freeze.iter().chain(freezes.iter().flatten()) {
         let text = tr!(
             "Admissions frozen: {}. Lifted by: {}.",
@@ -1141,8 +1266,49 @@ pub fn schedule(state: &State, m: &Measures, c: &Config, now: u64) -> Plan {
     Plan { state: e, events, persist, reasons, freeze_texts, pressure }
 }
 
+/// Pause order given to an active ticket while another one has priority; the command guard enforces it.
+pub fn pause_order(id: u64, priority: u64) -> String {
+    tr!(
+        " Pause: ticket #{priority} has priority. Start no new heavy command: let the current one finish, then \
+         release(ticket={id}).",
+        " Pause : le ticket #{priority} est prioritaire. Ne lance plus de commande lourde : laisse finir celle en cours, \
+         puis release(ticket={id})."
+    )
+}
+
+/// Marks `id` as the priority ticket (replacing any other), or removes the priority.
+pub fn set_priority(e: &State, id: u64, on: bool) -> Result<(State, String), String> {
+    let t = e.ticket(id).ok_or_else(|| tr!("Ticket #{id} unknown.", "Ticket #{id} inconnu."))?;
+    let mut new = e.clone();
+    if !on {
+        if e.priority != Some(id) {
+            return Err(tr!("Ticket #{id} is not the priority ticket.", "Le ticket #{id} n'est pas prioritaire."));
+        }
+        new.priority = None;
+        return Ok((new, tr!("Priority removed from #{id}: admissions resume.", "Priorité retirée au #{id} : les admissions reprennent.")));
+    }
+    if e.priority == Some(id) {
+        return Err(tr!("Ticket #{id} already has priority.", "Le ticket #{id} est déjà prioritaire."));
+    }
+    let replaced = e.priority.map_or(String::new(), |p| tr!(" (replaces #{p})", " (remplace le #{p})"));
+    new.priority = Some(id);
+    let message = if t.state == TicketState::Waiting {
+        tr!(
+            "#{id} has priority{replaced}: no other admission; it starts once the active tickets are done.",
+            "#{id} est prioritaire{replaced} : plus aucune admission ; il démarre après les tickets actifs."
+        )
+    } else {
+        tr!(
+            "#{id} has priority{replaced}: no other admission until it is released.",
+            "#{id} est prioritaire{replaced} : plus aucune admission jusqu'à sa libération."
+        )
+    };
+    Ok((new, message))
+}
+
 fn need_summary(t: &Ticket) -> String {
-    format!("{}, {}, {}", t.side.name(), gb(t.need.ram_mb as i64), cores(t.need.cpu as i64))
+    let gpu = if t.need.gpu_mb > 0 { tr!(", GPU {}", ", GPU {}", gb(t.need.gpu_mb as i64)) } else { String::new() };
+    format!("{}, {}, {}{gpu}", t.side.name(), gb(t.need.ram_mb as i64), cores(t.need.cpu as i64))
 }
 
 /// Confirmation text for a forced clearance: what would stay free on each reserve the ticket debits.
@@ -1314,7 +1480,17 @@ fn wait_reason(
                 ram_option(max)
             );
         }
-    } else if lacking.iter().all(|r| !r.is_ram()) {
+    } else if lacking == [Reserve::Gpu] {
+        let max = lev[Reserve::Gpu.i()].free();
+        if max >= 256 {
+            message += &tr!(
+                " `clearway resize {} --gpu {}` (or less) would pass now.",
+                " « clearway resize {} --gpu {} » (ou moins) passerait maintenant.",
+                t.id,
+                ram_option(max)
+            );
+        }
+    } else if lacking.iter().all(|r| !r.is_memory()) {
         let max = lacking.iter().map(|r| lev[r.i()].free()).min().unwrap_or(0);
         if max >= 1 {
             message += &tr!(
@@ -1364,8 +1540,8 @@ fn estimate(t: &Ticket, lev: &[Level; RESERVE_COUNT], e: &State, m: &Measures, c
 /// New need of `t` once lowered by `d`, or why it cannot be.
 pub fn lowered(t: &Ticket, d: &Resize, now: u64) -> Result<Need, String> {
     let id = t.id;
-    if d.ram_mb.is_none() && d.cpu.is_none() && d.duration_s.is_none() {
-        return Err(tr!("nothing to lower: give ram, cpu or duration", "rien à baisser : indique ram, cpu ou duration"));
+    if d.ram_mb.is_none() && d.cpu.is_none() && d.duration_s.is_none() && d.gpu_mb.is_none() {
+        return Err(tr!("nothing to lower: give ram, cpu, gpu or duration", "rien à baisser : indique ram, cpu, gpu ou duration"));
     }
     if t.state == TicketState::Orphaned {
         return Err(tr!("Ticket #{id} orphaned: nothing to lower.", "Ticket #{id} orphelin : rien à baisser."));
@@ -1375,7 +1551,8 @@ pub fn lowered(t: &Ticket, d: &Resize, now: u64) -> Result<Need, String> {
     }
     let raised = d.ram_mb.is_some_and(|v| v > t.need.ram_mb)
         || d.cpu.is_some_and(|v| v > t.need.cpu)
-        || d.duration_s.is_some_and(|v| v > t.need.duration_s);
+        || d.duration_s.is_some_and(|v| v > t.need.duration_s)
+        || d.gpu_mb.is_some_and(|v| v > t.need.gpu_mb);
     if raised {
         return Err(tr!(
             "Ticket #{id}: resize only lowers ({}). To need more, `extend` the duration or request a new ticket.",
@@ -1397,6 +1574,7 @@ pub fn lowered(t: &Ticket, d: &Resize, now: u64) -> Result<Need, String> {
         ram_mb: d.ram_mb.unwrap_or(t.need.ram_mb),
         cpu: d.cpu.unwrap_or(t.need.cpu),
         duration_s: d.duration_s.unwrap_or(t.need.duration_s),
+        gpu_mb: d.gpu_mb.unwrap_or(t.need.gpu_mb),
     })
 }
 

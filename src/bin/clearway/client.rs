@@ -44,15 +44,17 @@ fn help() -> String {
         "\
 clearway: queue for heavy tasks, served by clearway.exe (Windows) through its relay
 
-  clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--duration 15m] [--max 9m] \"description\" -- command…
+  clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--gpu 6G] [--duration 15m] [--max 9m] \"description\" -- command…
       requests a slot, waits for clearance in the foreground, runs the command, reports its presence,
       releases at the end; rerunning the same command resumes the same ticket
   clearway request [options] [\"<session>\"] \"<description>\"
       creates a manual ticket and prints its number; the declared duration is its lease
   clearway wait <ticket> [--max 9m]       waits for clearance in the foreground, printing each change
   clearway extend <ticket> <duration> \"<reason>\"   extends the duration of an active ticket
-  clearway resize <ticket> [--ram 1G] [--cpu 1] [--duration 20m] [\"<reason>\"]
+  clearway resize <ticket> [--ram 1G] [--cpu 1] [--gpu 2G] [--duration 20m] [\"<reason>\"]
       lowers the estimate of a waiting or active ticket, never raises it
+  clearway priority <ticket> [--off]      gives the ticket priority: no other admission, the active tickets stop
+                                          starting heavy commands; for you, not for the sessions
   clearway release <ticket> [--code N]    releases the slot
   clearway cancel <ticket>                withdraws the request or releases the slot
   clearway status                         queue, reserves and measures
@@ -66,15 +68,17 @@ CLEARWAY_SESSION (displayed name).
         "\
 clearway : file des tâches lourdes, servie par clearway.exe (Windows) à travers son relais
 
-  clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--duration 15m] [--max 9m] \"description\" -- commande…
+  clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--gpu 6G] [--duration 15m] [--max 9m] \"description\" -- commande…
       demande un créneau, attend le feu vert au premier plan, lance la commande, signale sa présence,
       libère à la fin ; relancer la même commande reprend le même ticket
   clearway request [options] [\"<session>\"] \"<description>\"
       crée un ticket manuel et affiche son numéro ; la durée déclarée sert de bail
   clearway wait <ticket> [--max 9m]       attend le feu vert au premier plan, en écrivant chaque changement
   clearway extend <ticket> <durée> \"<raison>\"   allonge la durée d'un ticket actif
-  clearway resize <ticket> [--ram 1G] [--cpu 1] [--duration 20m] [\"<raison>\"]
+  clearway resize <ticket> [--ram 1G] [--cpu 1] [--gpu 2G] [--duration 20m] [\"<raison>\"]
       baisse l'estimation d'un ticket en attente ou actif, sans jamais la monter
+  clearway priority <ticket> [--off]      rend le ticket prioritaire : plus aucune admission, les tickets actifs ne
+                                          lancent plus de commande lourde ; pour vous, pas pour les sessions
   clearway release <ticket> [--code N]    libère le créneau
   clearway cancel <ticket>                retire la demande ou libère le créneau
   clearway status                         file, réserves et mesures
@@ -180,6 +184,7 @@ fn execute(args: &[String]) -> Result<i32, String> {
         "wait" | "attend" => wait_cmd(left),
         "extend" | "prolonge" => extend_cmd(left),
         "resize" => resize_cmd(left),
+        "priority" => priority_cmd(left),
         "release" | "fin" => end(left),
         "cancel" | "annule" => cancel_cmd(number(left)?),
         "status" | "statut" => status_view(),
@@ -616,8 +621,10 @@ struct Options {
     side: Side,
     ram_mb: Option<u64>,
     cpu: Option<u32>,
+    gpu_mb: Option<u64>,
     duration_s: Option<u64>,
     max_s: u64,
+    off: bool,
     code: Option<i32>,
     positionals: Vec<String>,
     command: Vec<String>,
@@ -629,8 +636,10 @@ fn options(args: &[String], with_command: bool) -> Result<Options, String> {
         side: Side::Wsl,
         ram_mb: None,
         cpu: None,
+        gpu_mb: None,
         duration_s: None,
         max_s: DEFAULT_MAX_S,
+        off: false,
         code: None,
         positionals: Vec::new(),
         command: Vec::new(),
@@ -667,6 +676,16 @@ fn options(args: &[String], with_command: bool) -> Result<Options, String> {
                     tr!("unreadable --ram: `{v}` (e.g. 3G, 1.5G, 512M)", "--ram illisible : « {v} » (ex. 3G, 1.5G, 512M)")
                 })?);
             }
+            "--gpu" => {
+                let v = value()?;
+                o.gpu_mb = Some(parse_ram(&v).ok_or_else(|| {
+                    tr!(
+                        "unreadable --gpu: `{v}` (video memory, e.g. 6G, 512M)",
+                        "--gpu illisible : « {v} » (mémoire vidéo, ex. 6G, 512M)"
+                    )
+                })?);
+            }
+            "--off" => o.off = true,
             "--cpu" => {
                 let v = value()?;
                 o.cpu = Some(v.parse().ok().filter(|&n| n > 0).ok_or_else(|| {
@@ -801,7 +820,7 @@ fn request_from(o: &Options, session: String, description: String, manual: bool)
             session_claude.clone().unwrap_or_else(|| session.clone()),
             dir.clone(),
             o.side.name().into(),
-            format!("{:?} {:?} {:?}", o.ram_mb, o.cpu, o.duration_s),
+            format!("{:?} {:?} {:?} {:?}", o.ram_mb, o.cpu, o.duration_s, o.gpu_mb),
             description.clone(),
             o.command.join("\u{1f}"),
         ]
@@ -813,6 +832,7 @@ fn request_from(o: &Options, session: String, description: String, manual: bool)
         ram_mb: o.ram_mb,
         cpu: o.cpu,
         duration_s: o.duration_s,
+        gpu_mb: o.gpu_mb,
         description,
         session,
         claude_session_id: session_claude,
@@ -1071,16 +1091,22 @@ fn resize_cmd(args: &[String]) -> Result<i32, String> {
     let c = cmd("resize");
     let usage = || {
         tr!(
-            "usage: {c} <ticket> [--ram 1G] [--cpu 1] [--duration 20m] [\"<reason>\"] (e.g. {c} 12 --cpu 1 \"Waits on the network\")",
-            "usage : {c} <ticket> [--ram 1G] [--cpu 1] [--duration 20m] [\"<raison>\"] (ex. {c} 12 --cpu 1 \"Attend le réseau\")"
+            "usage: {c} <ticket> [--ram 1G] [--cpu 1] [--gpu 2G] [--duration 20m] [\"<reason>\"] (e.g. {c} 12 --cpu 1 \"Waits on the network\")",
+            "usage : {c} <ticket> [--ram 1G] [--cpu 1] [--gpu 2G] [--duration 20m] [\"<raison>\"] (ex. {c} 12 --cpu 1 \"Attend le réseau\")"
         )
     };
     let id = args.first().and_then(|a| a.trim_start_matches('#').parse::<u64>().ok()).ok_or_else(usage)?;
     let o = options(&args[1..], false)?;
-    if o.ram_mb.is_none() && o.cpu.is_none() && o.duration_s.is_none() {
+    if o.ram_mb.is_none() && o.cpu.is_none() && o.duration_s.is_none() && o.gpu_mb.is_none() {
         return Err(usage());
     }
-    let body = Resize { ram_mb: o.ram_mb, cpu: o.cpu, duration_s: o.duration_s, reason: o.positionals.join(" ") };
+    let body = Resize {
+        ram_mb: o.ram_mb,
+        cpu: o.cpu,
+        duration_s: o.duration_s,
+        gpu_mb: o.gpu_mb,
+        reason: o.positionals.join(" "),
+    };
     let mut client = Client::new()?;
     let r = client.request("POST", &format!("/tickets/{id}/resize"), serde_json::to_value(body).map_err(|e| e.to_string())?)?;
     match r.code {
@@ -1100,6 +1126,24 @@ fn resize_cmd(args: &[String]) -> Result<i32, String> {
             Ok(1)
         }
         code => Err(tr!("resize of #{id} ({code}): {}", "réduction du #{id} ({code}) : {}", message(&r.body))),
+    }
+}
+
+fn priority_cmd(args: &[String]) -> Result<i32, String> {
+    let id = number(args).map_err(|_| tr!("usage: clearway priority <ticket> [--off]", "usage : clearway priority <ticket> [--off]"))?;
+    let o = options(&args[1..], false)?;
+    let mut client = Client::new()?;
+    let r = client.request("POST", &format!("/tickets/{id}/priority"), json!({ "on": !o.off }))?;
+    match r.code {
+        200 => {
+            println!("{}", message(&r.body));
+            Ok(0)
+        }
+        404 => {
+            eprintln!("{}", message(&r.body));
+            Ok(1)
+        }
+        code => Err(tr!("priority of #{id} ({code}): {}", "priorité du #{id} ({code}) : {}", message(&r.body))),
     }
 }
 
@@ -1192,7 +1236,20 @@ fn status_view() -> Result<i32, String> {
     if let Some(g) = s.manual_freeze {
         println!("{}", tr!("! Queue frozen by hand since {}.", "! File gelée à la main depuis {}.", hhmm(g)));
     }
-    for r in &s.reserves {
+    for g in &m.gpus {
+        let used = g.vram_used_mb.map_or(tr!("unknown", "inconnue"), |u| gb(u as i64));
+        let busy = g.busy_pct.map_or(String::new(), |p| tr!(" · busy {p:.0} %", " · occupé {p:.0} %"));
+        println!(
+            "{}",
+            tr!(
+                "GPU: {} · video memory {used} used of {}{busy}",
+                "GPU : {} · mémoire vidéo {used} utilisée sur {}{busy}",
+                g.name,
+                gb(g.vram_total_mb as i64)
+            )
+        );
+    }
+    for r in s.reserves.iter().filter(|r| r.key != "gpu" || r.total > 0) {
         let q = |v: i64| if r.key.starts_with("cpu") { cores(v) } else { gb(v) };
         println!(
             "{}",
@@ -1221,12 +1278,16 @@ fn status_view() -> Result<i32, String> {
             (Some(p), None) => format!(" {p}"),
             _ => String::new(),
         };
-        let flags = match (t.force, t.manual) {
-            (true, true) => tr!(" (forced, manual)", " (forcé, manuel)"),
-            (true, false) => tr!(" (forced)", " (forcé)"),
-            (false, true) => tr!(" (manual)", " (manuel)"),
-            (false, false) => String::new(),
-        };
+        let flags: Vec<String> = [
+            (t.priority, tr!("priority", "prioritaire")),
+            (t.force, tr!("forced", "forcé")),
+            (t.manual, tr!("manual", "manuel")),
+            (t.need.gpu_mb > 0, format!("GPU {}", gb(t.need.gpu_mb as i64))),
+        ]
+        .into_iter()
+        .filter_map(|(on, text)| on.then_some(text))
+        .collect();
+        let flags = if flags.is_empty() { String::new() } else { format!(" ({})", flags.join(", ")) };
         let overrun = if t.lease_overrun { tr!(" (lease overrun)", " (bail dépassé)") } else { String::new() };
         println!(
             "{}",

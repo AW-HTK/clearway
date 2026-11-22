@@ -8,13 +8,14 @@ fn ticket(id: u64, state: TicketState, identity: Option<&str>, claude: Option<&s
         id,
         state,
         side: Side::Wsl,
-        need: Need { ram_mb: 1024, cpu: 2, duration_s: 600 },
+        need: Need { ram_mb: 1024, cpu: 2, duration_s: 600, gpu_mb: 0 },
         description: "build".into(),
         session: "s".into(),
         created: 0,
         granted: None,
         manual: false,
         force: false,
+        priority: false,
         lease_overrun: false,
         project: None,
         branch: None,
@@ -164,4 +165,25 @@ fn deny_output_follows_the_pre_tool_use_format() {
     assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
     assert_eq!(out["hookSpecificOutput"]["permissionDecisionReason"], "why");
+}
+
+#[test]
+fn priority_of_another_ticket_pauses_the_session() {
+    let mut mine = ticket(4, TicketState::Active, Some("claude:abc"), Some("abc"));
+    let mut other = ticket(5, TicketState::Waiting, Some("claude:zzz"), Some("zzz"));
+    other.priority = true;
+    let verdict = decide("cargo build", "cargo build", "abc", &[], false, &[mine.clone(), other.clone()]);
+    assert!(matches!(&verdict, Verdict::Deny(r) if r.contains("#5") && r.contains("ticket=4")), "{verdict:?}");
+    mine.priority = true;
+    other.priority = false;
+    assert_eq!(decide("cargo build", "cargo build", "abc", &[], false, &[mine, other]), Verdict::Allow);
+}
+
+#[test]
+fn sessions_cannot_give_priority() {
+    assert!(priority_request("clearway priority 12"));
+    assert!(priority_request("cd /tmp && /usr/local/bin/clearway priority 12 --off"));
+    assert!(priority_request("clearway.exe priority 3"));
+    assert!(!priority_request("clearway status"));
+    assert!(!priority_request("echo 'clearway priority 3'"));
 }

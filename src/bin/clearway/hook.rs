@@ -24,6 +24,10 @@ pub fn main(_args: &[String]) -> i32 {
     }
     let Ok(input) = serde_json::from_str::<Value>(&raw) else { return 0 };
     let Some((session_id, command)) = hook::shell_command(&input) else { return 0 };
+    if hook::priority_request(&command) {
+        deny(&hook::priority_denial());
+        return 0;
+    }
     let Some(what) = hook::heavy(&command) else { return 0 };
 
     let pipe = std::env::var("CLEARWAY_PIPE").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| DEFAULT_PIPE.into());
@@ -36,11 +40,15 @@ pub fn main(_args: &[String]) -> i32 {
     };
     let ancestors: Vec<u32> = crate::mcp_server::ancestors().iter().map(|p| p.pid).collect();
     if let Verdict::Deny(reason) = hook::decide(&what, &command, &session_id, &ancestors, hook::codex_tool(&input), &status.tickets) {
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{}", hook::deny_output(&reason));
-        let _ = out.flush();
+        deny(&reason);
     }
     0
+}
+
+fn deny(reason: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{}", hook::deny_output(reason));
+    let _ = out.flush();
 }
 
 /// `GET /status`, abandoned after `SERVER_TIMEOUT`: the hook must never hold the session up.
