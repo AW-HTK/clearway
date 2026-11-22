@@ -16,6 +16,8 @@ minute, or the GPU.
    - `description`: what the task is, in a few words (shown to the user in the queue);
    - `ram` at peak (`"6G"`), `cpu` cores, `duration` (`"20m"`, the lease) — estimate them honestly; when
      unsure, leave them out and the defaults apply;
+   - `gpu`: the video memory the task takes on the graphics card (`"6G"`), only when it uses the GPU (CUDA,
+     local AI model, render);
    - `side`: `wsl` or `windows`, where the command runs;
    - `dir`: the absolute folder the command runs in, when it is not the session's folder (a git worktree, for
      instance), so that the queue shows the right branch.
@@ -31,9 +33,12 @@ minute, or the GPU.
 4. **Release the slot** with `release(ticket, code)`, passing the exit code — also when the task failed. If the
    task takes longer than declared, call `extend(ticket, duration, reason)` before the lease ends.
 5. If the task needs less than declared (it mostly waits on the network, uses fewer cores, ends sooner), call
-   `resize(ticket, ram, cpu, duration, reason)` with the lower values, whether the ticket waits or runs: the
+   `resize(ticket, ram, cpu, gpu, duration, reason)` with the lower values, whether the ticket waits or runs: the
    queue moves on at once. `resize` never raises a need.
 6. If you abandon the task, call `cancel(ticket)`.
+7. If the guard or `status` says another ticket has **priority**, start no new heavy command: let the current
+   one finish, then `release` your ticket and ask again later. Only the user gives a ticket priority; never
+   run `clearway priority` yourself.
 
 `status` shows the queue, the free resources and why each ticket waits. Report its explanation to the user
 when they ask why the task has not started.

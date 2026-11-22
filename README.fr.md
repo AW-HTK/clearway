@@ -35,7 +35,10 @@ créneau. Une garde refuse les commandes lourdes lancées sans créneau.
 | La session demande un créneau : `request_clearance("cargo test", ram="3G", cpu=4)` | Clearway attend qu'il y ait la place : RAM et CPU mesurés sous Windows et dans WSL, moins ce que les tickets actifs vont encore consommer, moins une marge de sécurité. | La session lance sa tâche, puis `release(ticket, code)`. Le ticket suivant passe. |
 
 Les créneaux sont accordés dans l'ordre d'arrivée ; une petite tâche qui finit avant que la tête de file puisse partir
-peut passer devant. `clearway.exe` tourne sous Windows (icône près de l'horloge et fenêtre) ; les sessions le joignent
+peut passer devant. Une tâche qui utilise la carte graphique déclare aussi sa mémoire vidéo (`gpu="6G"`) : seules les
+cartes dédiées comptent, avec 20 % gardés libres. Depuis la fenêtre (clic droit sur un ticket, ou **Prioritaire…**) ou
+avec `clearway priority <ticket>`, vous pouvez rendre un ticket prioritaire : plus rien d'autre n'est admis, les tickets
+en cours finissent leur commande sans en lancer d'autre, et il démarre quand ils ont fini. `clearway.exe` tourne sous Windows (icône près de l'horloge et fenêtre) ; les sessions le joignent
 par le serveur MCP `clearway`, ou par la commande `clearway` dans WSL. Les messages sont en français ou en anglais.
 
 ## Installation
@@ -123,8 +126,9 @@ programme Windows ne peut démarrer : Codex passe donc uniquement par les outils
 - Serveur (Windows) : `clearway.exe [serve] [--dir <chemin>] [--test | --test-icon]`. `--test` : rien à l'écran.
 - Relais : `clearway.exe relay [--pipe <nom>]` (stdin/stdout ↔ tube nommé ; code 69 si le serveur est absent, 74 si
   le tube se ferme).
-- Client (WSL) : `clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--duration 15m] [--max 9m] "description" --
-  commande…`, `clearway request`, `wait`, `extend`, `resize`, `release`, `cancel`, `status`. Codes de sortie : 0, 1 ticket sorti
+- Client (WSL) : `clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--gpu 6G] [--duration 15m] [--max 9m]
+  "description" -- commande…`, `clearway request`, `wait`, `extend`, `resize`, `release`, `cancel`, `status`,
+  `priority <ticket> [--off]` (pour vous : la garde le refuse aux sessions). Codes de sortie : 0, 1 ticket sorti
   de la file, 2 erreur, 3 refus, 75 toujours en attente après `--max` ou feu vert repris avant l'accusé de réception
   (relancer la même commande garde la place), 130 interrompu.
 - Garde : `clearway hook` / `clearway.exe hook` (événement PreToolUse sur stdin, refus sur stdout).
@@ -139,8 +143,10 @@ programme Windows ne peut démarrer : Codex passe donc uniquement par les outils
 - Exe : `%LOCALAPPDATA%\Programs\clearway\clearway.exe` ; tâche planifiée `Clearway` ; installé et mis à jour par
   `windows/install.ps1` (ou `clearway-setup.exe`, qui le lance).
 - État : `%LOCALAPPDATA%\clearway\` (`state.json`, `clearway.log`, `config.toml` écrit au premier démarrage).
-- `config.toml` : `pipe`, `legacy_pipe`, `language` (`en`, `fr`, `auto`), réserves, marges, besoins par défaut, délais,
-  seuils de remplissage et de swap ; le fichier écrit au premier démarrage documente chaque clé.
+- `config.toml` : `pipe`, `legacy_pipe`, `language` (`en`, `fr`, `auto`), réserves, marges (`margin.gpu` : pourcentage
+  de la mémoire vidéo de la carte, 20 par défaut), `gpu.adapter` (partie du nom de la carte ; par défaut la carte dédiée
+  qui a le plus de mémoire vidéo), besoins par défaut, délais, seuils de remplissage et de swap ; le fichier écrit au
+  premier démarrage documente chaque clé.
 
 </details>
 
@@ -151,7 +157,7 @@ programme Windows ne peut démarrer : Codex passe donc uniquement par les outils
   `$XDG_RUNTIME_DIR/clearway-<pipe>.sock` hors de Windows. Une requête JSON par ligne
   (`{"method","path","params","body"}`), une réponse par ligne (`{"code","body"}`).
 - Routes : `POST /tickets`, `GET /tickets/{n}/wait` (`known`, `timeout_s`, `ack`), `POST /tickets/{n}/presence`,
-  `/extend`, `/resize`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
+  `/extend`, `/resize`, `/priority`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
   `/link/heartbeat`.
 - Multiplexage : une requête avec un `"id"` tourne dans son propre fil et sa réponse porte le même `id`, dans n'importe
   quel ordre ; sans `id`, les requêtes sont servies l'une après l'autre. Le relais copie dans les deux sens à la fois

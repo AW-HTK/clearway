@@ -46,6 +46,9 @@ pub struct Need {
     pub ram_mb: u64,
     pub cpu: u32,
     pub duration_s: u64,
+    /// Video memory on the dedicated graphics card Clearway reserves for (see [`Measures::gpu`]).
+    #[serde(default)]
+    pub gpu_mb: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,6 +95,8 @@ pub struct Ticket {
     pub base_ram_wsl_mb: Option<i64>,
     #[serde(default)]
     pub base_vmmem_mb: Option<u64>,
+    #[serde(default)]
+    pub base_gpu_mb: Option<i64>,
     /// Clearance given by hand from the window, outside the queue order.
     #[serde(default)]
     pub force: bool,
@@ -125,6 +130,9 @@ pub struct State {
     pub vmmem_pid: Option<u32>,
     #[serde(default)]
     pub manual_freeze: Option<u64>,
+    /// Priority ticket: no other admission until it is released; it starts once the other active tickets are done.
+    #[serde(default)]
+    pub priority: Option<u64>,
     pub tickets: Vec<Ticket>,
     /// Swap pressure hysteresis: declared, and calm since when.
     #[serde(skip)]
@@ -215,6 +223,20 @@ impl WslMeasures {
     }
 }
 
+/// Dedicated graphics card (integrated GPUs are left out), identified by its adapter LUID.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Gpu {
+    pub luid: String,
+    pub name: String,
+    pub vram_total_mb: u64,
+    /// `None` when the Windows GPU counters are unavailable.
+    #[serde(default)]
+    pub vram_used_mb: Option<u64>,
+    /// Busiest engine type (3D, compute, copy, video…), in percent, as Task Manager shows it.
+    #[serde(default)]
+    pub busy_pct: Option<f32>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Measures {
     pub ram_total_mb: u64,
@@ -230,6 +252,19 @@ pub struct Measures {
     pub vmmem: Option<Vmmem>,
     #[serde(default)]
     pub wsl: Option<WslMeasures>,
+    #[serde(default)]
+    pub gpus: Vec<Gpu>,
+}
+
+impl Measures {
+    /// Card the GPU reserve stands for: the one whose name contains `adapter`, else the one with the most video memory.
+    pub fn gpu(&self, adapter: &str) -> Option<&Gpu> {
+        let wanted = adapter.trim().to_lowercase();
+        if !wanted.is_empty() {
+            return self.gpus.iter().find(|g| g.name.to_lowercase().contains(&wanted));
+        }
+        self.gpus.iter().max_by_key(|g| g.vram_total_mb)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -239,6 +274,8 @@ pub struct TicketRequest {
     pub ram_mb: Option<u64>,
     pub cpu: Option<u32>,
     pub duration_s: Option<u64>,
+    #[serde(default)]
+    pub gpu_mb: Option<u64>,
     pub description: String,
     pub session: String,
     pub claude_session_id: Option<String>,
@@ -293,6 +330,8 @@ pub struct Resize {
     pub cpu: Option<u32>,
     #[serde(default)]
     pub duration_s: Option<u64>,
+    #[serde(default)]
+    pub gpu_mb: Option<u64>,
     #[serde(default)]
     pub reason: String,
 }
@@ -403,6 +442,9 @@ pub struct ReserveView {
     /// Measured use of a CPU reserve, in percent of its budget (WSL: 1-min load average; Windows: CPU usage).
     #[serde(default)]
     pub used_pct: Option<u32>,
+    /// GPU reserve: the graphics card it stands for (see [`Gpu::luid`]).
+    #[serde(default)]
+    pub card: Option<String>,
 }
 
 impl ReserveView {
@@ -443,6 +485,8 @@ pub struct TicketView {
     pub manual: bool,
     #[serde(default)]
     pub force: bool,
+    #[serde(default)]
+    pub priority: bool,
     #[serde(default)]
     pub lease_overrun: bool,
     #[serde(default)]

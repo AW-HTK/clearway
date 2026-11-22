@@ -1,7 +1,7 @@
-﻿﻿# Opens the window of a test instance off screen (nothing visible) and saves it as PNG:
-# window-capture.ps1 <output.png> [-SourceExe <built clearway.exe>]
+﻿# Opens the window of a test instance off screen (nothing visible) and saves it as PNG:
+# window-capture.ps1 <output.png> [-SourceExe <built clearway.exe>] [-Language en|fr]
 # Uses the test copy %LOCALAPPDATA%\clearway-test\bin\clearway.exe, its own state dir and pipe; never the installed Clearway.
-param([Parameter(Mandatory)][string]$Output, [string]$SourceExe)
+param([Parameter(Mandatory)][string]$Output, [string]$SourceExe, [string]$Language = 'en')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -Namespace W -Name U -MemberDefinition @'
@@ -22,7 +22,7 @@ function Call($m, $path, $body) {
   $w.WriteLine((@{ method = $m; path = $path; params = @{}; body = $body } | ConvertTo-Json -Compress -Depth 5))
   $l = [IO.StreamReader]::new($p).ReadLine(); $p.Dispose(); $l | ConvertFrom-Json
 }
-function Ticket($r, $ram, $d, $manual) { Call POST '/tickets' @{ request_id=$r; side='wsl'; ram_mb=[int64]$ram; cpu=2; duration_s=900; description=$d; session='capture-test'; claude_session_id=$null; claude_pid=$null; dir='/'; signature=''; measures=$null; manual=$manual } | Out-Null }
+function Ticket($r, $ram, $d, $manual, $gpu = 0) { Call POST '/tickets' @{ request_id=$r; side='wsl'; ram_mb=[int64]$ram; cpu=2; gpu_mb=[int64]$gpu; duration_s=900; description=$d; session='capture-test'; claude_session_id=$null; claude_pid=$null; dir='/'; signature=''; measures=$null; manual=$manual } | Out-Null }
 # The window of the test process only, even if the installed Clearway has its own open.
 function TestWindow($procId) {
   $h = [IntPtr]::Zero
@@ -38,7 +38,7 @@ New-Item -ItemType Directory -Force (Split-Path $exe) | Out-Null
 if ($SourceExe) { Copy-Item $SourceExe $exe -Force }
 elseif (-not (Test-Path $exe)) { throw "no test copy at ${exe}: pass -SourceExe <path to the built clearway.exe>" }
 Remove-Item (Join-Path $dir 'state.json') -ErrorAction SilentlyContinue
-Set-Content (Join-Path $dir 'config.toml') "pipe = `"$pipe`"`nlegacy_pipe = false`nlanguage = `"en`"" -Encoding ASCII
+Set-Content (Join-Path $dir 'config.toml') "pipe = `"$pipe`"`nlegacy_pipe = false`nlanguage = `"$Language`"" -Encoding ASCII
 $proc = Start-Process -FilePath $exe -ArgumentList 'serve', '--dir', "`"$dir`"", '--test' -PassThru
 $deadline = (Get-Date).AddSeconds(10)
 while ($true) {
@@ -47,6 +47,8 @@ while ($true) {
 Ticket 'c1' 2048 'Differential Infection run' $false
 Ticket 'c2' 1536 'Godot headless: GUT suite' $true
 Ticket 'c3' 9000 'docker compose up of the full stack' $false
+Ticket 'c4' 1024 'Local image model: batch render' $true 4096
+Call POST '/tickets/4/priority' @{ on = $true } | Out-Null
 Call POST '/window' @{ open = $true } | Out-Null
 Start-Sleep 4
 $h = TestWindow $proc.Id

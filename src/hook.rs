@@ -302,6 +302,26 @@ pub fn heavy(command: &str) -> Option<String> {
     heavy_at(command, 0)
 }
 
+/// `clearway priority …` in a shell line: giving priority is the user's call, never a session's.
+pub fn priority_request(command: &str) -> bool {
+    simple_commands(command).iter().any(|words| {
+        words
+            .iter()
+            .position(|w| program(w) == "clearway")
+            .and_then(|i| words.get(i + 1))
+            .is_some_and(|w| w == "priority")
+    })
+}
+
+pub fn priority_denial() -> String {
+    tr!(
+        "Clearway: giving a ticket priority is the user's decision. Ask them to run `clearway priority <ticket>` or to \
+         use \"Priority\" in the Clearway window.",
+        "Clearway : rendre un ticket prioritaire est la décision de l'utilisateur. Demande-lui de lancer « clearway \
+         priority <ticket> » ou d'utiliser « Prioritaire » dans la fenêtre Clearway."
+    )
+}
+
 /// `(session_id, command)` of a PreToolUse event whose tool runs a shell command.
 pub fn shell_command(input: &Value) -> Option<(String, String)> {
     let tool = input["tool_name"].as_str()?;
@@ -347,7 +367,22 @@ pub fn codex_tool(input: &Value) -> bool {
 /// Allows the heavy command `what` when the session holds an active ticket; `ancestors`: pids of the hook's parents.
 pub fn decide(what: &str, command: &str, session_id: &str, ancestors: &[u32], codex: bool, tickets: &[TicketView]) -> Verdict {
     let mine: Vec<&TicketView> = tickets.iter().filter(|t| owned_by(t, session_id, ancestors)).collect();
-    if mine.iter().any(|t| t.state == TicketState::Active) {
+    let active = mine.iter().find(|t| t.state == TicketState::Active);
+    if let Some(p) = tickets.iter().find(|t| t.priority).filter(|p| !mine.iter().any(|t| t.id == p.id)) {
+        let pause = match active {
+            Some(t) => crate::scheduler::pause_order(t.id, p.id),
+            None => tr!(
+                " No other admission until it is released: wait with await_clearance on your ticket.",
+                " Aucune autre admission jusqu'à sa libération : attends avec await_clearance sur ton ticket."
+            ),
+        };
+        return Verdict::Deny(tr!(
+            "Clearway: `{what}` refused, ticket #{} has priority.{pause}",
+            "Clearway : « {what} » refusée, le ticket #{} est prioritaire.{pause}",
+            p.id
+        ));
+    }
+    if active.is_some() {
         return Verdict::Allow;
     }
     let short: String = command.chars().take(120).collect();
