@@ -1067,3 +1067,26 @@ fn hook_refuses_heavy_commands_until_the_session_is_cleared() {
     o.kill();
     assert_eq!(hook(&o, "sess-hook", "cargo build"), (Some(0), String::new()), "Clearway absent: allowed");
 }
+
+#[test]
+fn force_and_priority_asked_by_a_session_wait_for_the_users_answer() {
+    let mut o = Orchestra::prepare("confirmation");
+    o.child = Some(o.process().env("CLEARWAY_TEST_CONFIRM", "yes").spawn().unwrap());
+    assert!(wait(Duration::from_secs(10), || o.answers()));
+    o.call("POST", "/freeze", json!({ "frozen": true }));
+    let id = o.create("c1", "wsl", 512).1["id"].as_u64().unwrap();
+    let id2 = o.create("c2", "wsl", 512).1["id"].as_u64().unwrap();
+    let (code, body) = o.call("POST", &format!("/tickets/{id}/force"), json!({ "requester": "session x", "reason": "urgent" }));
+    assert_eq!(code, 202, "{body}");
+    assert!(wait(Duration::from_secs(5), || o.ticket_state(id).as_deref() == Some("active")), "{}", o.log());
+    assert_eq!(o.call("POST", &format!("/tickets/{id}/force"), json!({})).0, 409, "no longer waiting");
+    assert_eq!(o.call("POST", &format!("/tickets/{id2}/priority"), json!({ "on": true, "requester": "session x" })).0, 202);
+    assert!(wait(Duration::from_secs(5), || o.ticket(id2).is_some_and(|t| t["priority"] == true)), "{}", o.log());
+    assert!(o.log().contains("session x"), "{}", o.log());
+
+    let o = Orchestra::start("confirmation-refused");
+    let id = o.create("r1", "wsl", 512).1["id"].as_u64().unwrap();
+    assert_eq!(o.call("POST", &format!("/tickets/{id}/priority"), json!({ "on": true })).0, 202);
+    assert!(wait(Duration::from_secs(5), || o.log().contains("DECLINED")), "{}", o.log());
+    assert!(o.ticket(id).is_some_and(|t| t["priority"] == false));
+}

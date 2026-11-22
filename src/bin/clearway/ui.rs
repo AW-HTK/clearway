@@ -65,13 +65,24 @@ pub fn run_loop() {
     }
 }
 
+/// Without a screen (tests), the answer comes from `CLEARWAY_TEST_CONFIRM=yes`; anything else refuses.
+#[cfg_attr(windows, allow(dead_code))]
+fn test_answer() -> bool {
+    std::env::var("CLEARWAY_TEST_CONFIRM").is_ok_and(|v| v == "yes")
+}
+
+#[cfg(not(windows))]
+pub fn confirm(_title: &str, _text: &str, _timeout: std::time::Duration) -> bool {
+    test_answer()
+}
+
 #[cfg(not(windows))]
 pub fn warn(title: &str, text: &str) {
     eprintln!("{}", clearway::tr!("{title}: {text}", "{title} : {text}"));
 }
 
 #[cfg(windows)]
-pub use native::{warn, run_loop, balloon, update_balloon, open, start, window, update, open_log, quit};
+pub use native::{warn, run_loop, balloon, update_balloon, open, start, window, update, open_log, quit, confirm};
 
 #[cfg(windows)]
 mod native {
@@ -473,6 +484,41 @@ mod native {
             }
         }
         window::release_resources();
+    }
+
+    /// Yes/No question in front of every window, answered No after `timeout`; blocks the calling thread.
+    pub fn confirm(title: &str, text: &str, timeout: Duration) -> bool {
+        use std::sync::Arc;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, IDNO, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_SYSTEMMODAL, MB_TOPMOST, MB_YESNO,
+            MessageBoxW,
+        };
+        if TEST.load(Ordering::SeqCst) {
+            return super::test_answer();
+        }
+        let answered = Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let answered = answered.clone();
+            let title = wide(title);
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + timeout;
+                while !answered.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                if !answered.load(Ordering::SeqCst) {
+                    // #32770: the dialog class of message boxes; its title is unique to this request.
+                    let h = unsafe { FindWindowW(wide("#32770").as_ptr(), title.as_ptr()) };
+                    if !h.is_null() {
+                        unsafe { PostMessageW(h, WM_COMMAND, IDNO as usize, 0) };
+                    }
+                }
+            })
+        };
+        let flags = MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SYSTEMMODAL | MB_TOPMOST | MB_SETFOREGROUND;
+        let answer = unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide(title).as_ptr(), flags) };
+        answered.store(true, Ordering::SeqCst);
+        let _ = watcher.join();
+        answer == IDYES
     }
 
     /// Startup error: stderr only in test mode; otherwise a red tray icon and a balloon for a few seconds.

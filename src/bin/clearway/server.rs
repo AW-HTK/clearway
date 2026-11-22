@@ -84,7 +84,19 @@ pub struct Server {
     error_persistence: bool,
     links: BTreeMap<u64, LiveLink>,
     link_counter: u64,
+    /// Requests from sessions waiting for the user's answer in a confirmation dialog.
+    asking: BTreeSet<(u64, Ask)>,
 }
+
+/// What a session asks for and only the user can grant, in a confirmation dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Ask {
+    Force,
+    Priority(bool),
+}
+
+/// How long the confirmation dialog waits before the request counts as refused.
+pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub struct Shared {
     server: Mutex<Server>,
@@ -297,6 +309,7 @@ impl Server {
             error_persistence: false,
             links: BTreeMap::new(),
             link_counter: 0,
+            asking: BTreeSet::new(),
         };
         s.persist(&s.state)
             .map_err(|e| clearway::tr!("writing state.json: {e}", "écriture de state.json : {e}"))?;
@@ -747,19 +760,17 @@ impl Shared {
         Some(text)
     }
 
-    /// Clearance given by hand from the window; no pipe route leads here.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn force_through(&self, id: u64) -> Result<(), String> {
+    /// Clearance given outside the queue order: from the window, or a session's request the user confirmed.
+    pub fn force_through(&self, id: u64, origin: &str) -> Result<(), String> {
         let mut s = self.lock();
         let (candidate, detail) = scheduler::force_through(&s.state, id, &s.measures, &s.config, unix_now())?;
-        let prelude = format!("FORCED {detail} · {}", clearway::tr!("by hand (window)", "à la main (fenêtre)"));
+        let prelude = format!("FORCED {detail} · {origin}");
         let r = s.commit(candidate, true, None, Some(prelude));
         self.publish(s);
         r
     }
 
-    /// Gives `id` priority (or takes it back): from the window or `clearway priority`, which the command guard keeps
-    /// away from the sessions themselves.
+    /// Gives `id` priority (or takes it back): from the window, or a request the user confirmed.
     pub fn set_priority(&self, id: u64, on: bool, origin: &str) -> Response {
         let mut s = self.lock();
         let (candidate, message) = match scheduler::set_priority(&s.state, id, on) {
@@ -774,6 +785,108 @@ impl Shared {
         };
         self.publish(s);
         rep
+    }
+
+    /// A session asks to force a ticket or to change the priority: the user answers in a dialog on Windows, outside
+    /// the session. Answers 202 at once; the outcome is logged and shows in the status.
+    pub fn ask(&self, id: u64, what: Ask, requester: &str, reason: &str) -> Response {
+        let mut s = self.lock();
+        let Some(t) = s.state.ticket(id).cloned() else {
+            return not_found(&s, id);
+        };
+        let now = unix_now();
+        let check = match what {
+            Ask::Force => scheduler::force_preview(&s.state, id, &s.measures, &s.config, now).ok_or_else(|| {
+                clearway::tr!("Ticket #{id} is not waiting: nothing to force.", "Le ticket #{id} n'attend pas : rien à forcer.")
+            }),
+            Ask::Priority(on) => scheduler::set_priority(&s.state, id, on).map(|(_, m)| m),
+        };
+        let effect = match check {
+            Ok(e) => e,
+            Err(e) => return error(409, &e),
+        };
+        if !s.asking.insert((id, what)) {
+            return error(
+                409,
+                &clearway::tr!(
+                    "The same request for #{id} is already waiting for the user's answer.",
+                    "La même demande pour le #{id} attend déjà la réponse de l'utilisateur."
+                ),
+            );
+        }
+        let who = format!("{} — {}", t.session, t.description);
+        let reason = if reason.trim().is_empty() { clearway::tr!("none given", "non donnée") } else { reason.trim().to_owned() };
+        let (title, question, tag) = match what {
+            Ask::Force => (
+                clearway::tr!("Clearway: force #{id}?", "Clearway : forcer le #{id} ?"),
+                clearway::tr!(
+                    "The session \"{requester}\" asks to force ticket #{id} through, ahead of the queue.\n\n{who}\n\n{effect}\n\nReason: {reason}",
+                    "La session « {requester} » demande de forcer le ticket #{id}, hors de l'ordre de la file.\n\n{who}\n\n{effect}\n\nRaison : {reason}"
+                ),
+                "FORCE",
+            ),
+            Ask::Priority(true) => (
+                clearway::tr!("Clearway: give #{id} priority?", "Clearway : #{id} prioritaire ?"),
+                clearway::tr!(
+                    "The session \"{requester}\" asks to give ticket #{id} priority.\n\n{who}\n\nNo other ticket is admitted any more; the active tickets finish their current command without starting another; #{id} starts once they are done.\n\nReason: {reason}",
+                    "La session « {requester} » demande de rendre le ticket #{id} prioritaire.\n\n{who}\n\nPlus aucun autre ticket n'est admis ; les tickets actifs finissent leur commande en cours sans en lancer d'autre ; #{id} démarre quand ils ont fini.\n\nRaison : {reason}"
+                ),
+                "PRIORITY",
+            ),
+            Ask::Priority(false) => (
+                clearway::tr!("Clearway: remove the priority of #{id}?", "Clearway : retirer la priorité du #{id} ?"),
+                clearway::tr!(
+                    "The session \"{requester}\" asks to remove the priority of ticket #{id}: admissions would resume.\n\n{who}\n\nReason: {reason}",
+                    "La session « {requester} » demande de retirer la priorité du ticket #{id} : les admissions reprendraient.\n\n{who}\n\nRaison : {reason}"
+                ),
+                "UNPRIORITIZED",
+            ),
+        };
+        s.log(&format!(
+            "ASKED #{id} {} · {}",
+            ticket_summary(&t),
+            clearway::tr!(
+                "{tag} requested by \"{requester}\", waiting for the user's confirmation. Reason: {reason}",
+                "{tag} demandé par « {requester} », en attente de la confirmation de l'utilisateur. Raison : {reason}"
+            )
+        ));
+        drop(s);
+        let requester = requester.to_owned();
+        std::thread::spawn(move || {
+            let Some(p) = ui::shared() else { return };
+            let yes = ui::confirm(&title, &question, CONFIRM_TIMEOUT);
+            p.lock().asking.remove(&(id, what));
+            let origin = clearway::tr!(
+                "requested by \"{requester}\", confirmed by the user",
+                "demandé par « {requester} », confirmé par l'utilisateur"
+            );
+            let outcome = match (yes, what) {
+                (false, _) => Err(clearway::tr!("refused or left unanswered by the user", "refusé par l'utilisateur ou resté sans réponse")),
+                (true, Ask::Force) => p.force_through(id, &origin),
+                (true, Ask::Priority(on)) => {
+                    let r = p.set_priority(id, on, &origin);
+                    if r.code == 200 { Ok(()) } else { Err(message_of(&r.body)) }
+                }
+            };
+            if let Err(e) = outcome {
+                p.log(&format!(
+                    "DECLINED #{id} · {}",
+                    clearway::tr!("{tag} requested by \"{requester}\": {e}.", "{tag} demandé par « {requester} » : {e}.")
+                ));
+            }
+        });
+        response(
+            202,
+            json!({
+                "id": id,
+                "message": clearway::tr!(
+                    "Request sent to the user: they confirm or refuse in a Clearway dialog on Windows (5 min at most, \
+                     then refused). The outcome shows in `status` and the log.",
+                    "Demande transmise à l'utilisateur : il confirme ou refuse dans une boîte de dialogue Clearway sous \
+                     Windows (5 min au plus, ensuite refusé). Le résultat apparaît dans « status » et le journal."
+                )
+            }),
+        )
     }
 
     pub fn freeze(&self, frozen: bool, origin: &str) -> Response {
@@ -886,6 +999,14 @@ impl Context {
     }
 }
 
+fn requester(req: &Request) -> &str {
+    req.body["requester"].as_str().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("—")
+}
+
+fn message_of(body: &Value) -> String {
+    body["error"].as_str().or(body["message"].as_str()).unwrap_or_default().to_owned()
+}
+
 pub fn handle(p: &Shared, req: &Request, ctx: &Context) -> Response {
     let alive = &|| ctx.alive();
     let segments = req.segments();
@@ -901,8 +1022,11 @@ pub fn handle(p: &Shared, req: &Request, ctx: &Context) -> Response {
         ("POST", ["tickets", n, "extend"]) => id(n).map_or_else(invalid, |i| extend(p, req, i)),
         ("POST", ["tickets", n, "resize"]) => id(n).map_or_else(invalid, |i| resize(p, req, i)),
         ("POST", ["tickets", n, "priority"]) => id(n).map_or_else(invalid, |i| {
-            p.set_priority(i, req.body["on"].as_bool().unwrap_or(true), &clearway::tr!("command", "commande"))
+            p.ask(i, Ask::Priority(req.body["on"].as_bool().unwrap_or(true)), requester(req), req.body["reason"].as_str().unwrap_or(""))
         }),
+        ("POST", ["tickets", n, "force"]) => {
+            id(n).map_or_else(invalid, |i| p.ask(i, Ask::Force, requester(req), req.body["reason"].as_str().unwrap_or("")))
+        }
         ("POST", ["tickets", n, "release"]) => id(n).map_or_else(invalid, |i| {
             let f: Release = serde_json::from_value(req.body.clone()).unwrap_or_default();
             p.close_ticket(i, &f, Closing::Release)

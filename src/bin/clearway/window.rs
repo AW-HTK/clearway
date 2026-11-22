@@ -1186,7 +1186,7 @@ fn confirm_force(h: HWND, id: u64) {
         )
     };
     if response == IDYES
-        && let Err(e) = p.force_through(id)
+        && let Err(e) = p.force_through(id, &tr!("by hand (window)", "à la main (fenêtre)"))
     {
         unsafe { MessageBoxW(h, wide(&e).as_ptr(), title.as_ptr(), MB_ICONWARNING) };
     }

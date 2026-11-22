@@ -324,7 +324,7 @@ impl<C: Channel> Tools<C> {
 
     fn simple(&self, method: &str, path: String, body: Value) -> ToolResult {
         match self.call_server(method, &path, body) {
-            Ok(r) if r.code == 200 => ToolResult::text(message_of(&r.body)),
+            Ok(r) if r.code == 200 || r.code == 202 => ToolResult::text(message_of(&r.body)),
             Ok(r) => ToolResult::error(format!("{}: {}", r.code, message_of(&r.body))),
             Err(e) => ToolResult::error(tr!("Clearway unreachable: {e}", "Clearway injoignable : {e}")),
         }
@@ -449,6 +449,35 @@ impl<C: Channel> Provider for Tools<C> {
                 }), &["ticket"]),
             }),
             json!({
+                "name": "force",
+                "description": tr!(
+                    "ONLY when the user explicitly asked for it: asks to clear a waiting ticket at once, outside the queue \
+                     order. The user confirms or refuses in a dialog on Windows (5 min at most); answers at once, the \
+                     outcome shows in status.",
+                    "UNIQUEMENT si l'utilisateur l'a demandé explicitement : demande le feu vert immédiat d'un ticket en \
+                     attente, hors de l'ordre de la file. L'utilisateur confirme ou refuse dans une boîte de dialogue \
+                     sous Windows (5 min au plus) ; répond tout de suite, le résultat apparaît dans status."
+                ),
+                "inputSchema": schema(json!({ "ticket": ticket, "reason": { "type": "string" } }), &["ticket", "reason"]),
+            }),
+            json!({
+                "name": "priority",
+                "description": tr!(
+                    "ONLY when the user explicitly asked for it: asks to give a ticket priority (no other admission, the \
+                     active tickets start no new heavy command, it starts once they are done), or to remove it with \
+                     on=false. The user confirms in a dialog on Windows (5 min at most); the outcome shows in status.",
+                    "UNIQUEMENT si l'utilisateur l'a demandé explicitement : demande de rendre un ticket prioritaire (plus \
+                     aucune admission, les tickets actifs ne lancent plus de commande lourde, il démarre quand ils ont \
+                     fini), ou de retirer la priorité avec on=false. L'utilisateur confirme dans une boîte de dialogue \
+                     sous Windows (5 min au plus) ; le résultat apparaît dans status."
+                ),
+                "inputSchema": schema(json!({
+                    "ticket": ticket,
+                    "on": { "type": "boolean", "description": tr!("false to remove the priority", "false pour retirer la priorité") },
+                    "reason": { "type": "string" }
+                }), &["ticket", "reason"]),
+            }),
+            json!({
                 "name": "cancel",
                 "description": tr!("Withdraws a waiting ticket or releases an active one.", "Retire un ticket en attente ou libère un ticket actif."),
                 "inputSchema": schema(json!({ "ticket": ticket }), &["ticket"]),
@@ -498,6 +527,15 @@ impl<C: Channel> Provider for Tools<C> {
                 let reason = arguments["reason"].as_str().unwrap_or("").to_owned();
                 let body = Resize { ram_mb, cpu, duration_s, gpu_mb, reason };
                 Ok(self.simple("POST", format!("/tickets/{id}/resize"), serde_json::to_value(body).map_err(|e| e.to_string())?))
+            }
+            "force" | "priority" => {
+                let id = ticket_arg(arguments)?;
+                let body = json!({
+                    "on": arguments["on"].as_bool().unwrap_or(true),
+                    "requester": self.session.name,
+                    "reason": arguments["reason"].as_str().unwrap_or(""),
+                });
+                Ok(self.simple("POST", format!("/tickets/{id}/{name}"), body))
             }
             "cancel" => {
                 let id = ticket_arg(arguments)?;

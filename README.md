@@ -35,9 +35,10 @@ slot, waits for its turn, runs the task, then releases the slot. A guard refuses
 
 Slots are granted in arrival order; a small task that ends before the head of the queue could start may go first.
 A task using the graphics card also declares its video memory (`gpu="6G"`): only dedicated cards count, with 20 % kept
-free. From the window (right-click on a ticket, or **Priority…**) or `clearway priority <ticket>`, you can give one
-ticket priority: nothing else is admitted, the running tickets finish their current command without starting another,
-and it starts once they are done.
+free. From the window (right-click on a ticket, or **Priority…**) you can give one ticket priority: nothing else is
+admitted, the running tickets finish their current command without starting another, and it starts once they are done.
+A session can ask for it, or to force a ticket through, when you tell it to (`priority` and `force` tools, `clearway
+priority`, `clearway force`): Clearway then asks you in a dialog on Windows, and nothing happens without your yes.
 `clearway.exe` runs on Windows (tray icon and window); sessions reach it through the `clearway` MCP server, or the
 `clearway` command in WSL. Messages are in English or French.
 
@@ -125,7 +126,8 @@ programs cannot start, so Codex uses the MCP tools only.
   the pipe closes).
 - Client (WSL): `clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--gpu 6G] [--duration 15m] [--max 9m]
   "description" -- command…`, `clearway request`, `wait`, `extend`, `resize`, `release`, `cancel`, `status`,
-  `priority <ticket> [--off]` (for you: the guard refuses it to the sessions). Exit codes: 0, 1 ticket out of the
+  `priority <ticket> [--off]`, `force <ticket>`: a session may ask, the user confirms or refuses in a dialog on
+  Windows (5 min at most). Exit codes: 0, 1 ticket out of the
   queue, 2 error, 3 refused, 75 still waiting after `--max` or clearance taken back before the acknowledgement (rerun
   the same command to keep the place), 130 interrupted.
 - Hook: `clearway hook` / `clearway.exe hook` (PreToolUse event on stdin, refusal on stdout).
@@ -154,7 +156,7 @@ programs cannot start, so Codex uses the MCP tools only.
   `$XDG_RUNTIME_DIR/clearway-<pipe>.sock` outside Windows. One JSON request per line
   (`{"method","path","params","body"}`), one response per line (`{"code","body"}`).
 - Routes: `POST /tickets`, `GET /tickets/{n}/wait` (`known`, `timeout_s`, `ack`), `POST /tickets/{n}/presence`,
-  `/extend`, `/resize`, `/priority`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
+  `/extend`, `/resize`, `/priority`, `/force`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
   `/link/heartbeat`.
 - Multiplexing: a request with an `"id"` runs on its own thread and its response carries the same `id`, in any order;
   without `id`, requests are served one after the other. The relay copies both ways at once (overlapped I/O on

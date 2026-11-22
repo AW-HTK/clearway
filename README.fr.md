@@ -36,9 +36,11 @@ créneau. Une garde refuse les commandes lourdes lancées sans créneau.
 
 Les créneaux sont accordés dans l'ordre d'arrivée ; une petite tâche qui finit avant que la tête de file puisse partir
 peut passer devant. Une tâche qui utilise la carte graphique déclare aussi sa mémoire vidéo (`gpu="6G"`) : seules les
-cartes dédiées comptent, avec 20 % gardés libres. Depuis la fenêtre (clic droit sur un ticket, ou **Prioritaire…**) ou
-avec `clearway priority <ticket>`, vous pouvez rendre un ticket prioritaire : plus rien d'autre n'est admis, les tickets
-en cours finissent leur commande sans en lancer d'autre, et il démarre quand ils ont fini. `clearway.exe` tourne sous Windows (icône près de l'horloge et fenêtre) ; les sessions le joignent
+cartes dédiées comptent, avec 20 % gardés libres. Depuis la fenêtre (clic droit sur un ticket, ou **Prioritaire…**), vous
+pouvez rendre un ticket prioritaire : plus rien d'autre n'est admis, les tickets en cours finissent leur commande sans
+en lancer d'autre, et il démarre quand ils ont fini. Une session peut le demander, ou demander de forcer un ticket,
+quand vous le lui dites (outils `priority` et `force`, `clearway priority`, `clearway force`) : Clearway vous pose
+alors la question dans une boîte de dialogue sous Windows, et rien ne se fait sans votre oui. `clearway.exe` tourne sous Windows (icône près de l'horloge et fenêtre) ; les sessions le joignent
 par le serveur MCP `clearway`, ou par la commande `clearway` dans WSL. Les messages sont en français ou en anglais.
 
 ## Installation
@@ -128,7 +130,8 @@ programme Windows ne peut démarrer : Codex passe donc uniquement par les outils
   le tube se ferme).
 - Client (WSL) : `clearway run [--side wsl|windows] [--ram 3G] [--cpu 4] [--gpu 6G] [--duration 15m] [--max 9m]
   "description" -- commande…`, `clearway request`, `wait`, `extend`, `resize`, `release`, `cancel`, `status`,
-  `priority <ticket> [--off]` (pour vous : la garde le refuse aux sessions). Codes de sortie : 0, 1 ticket sorti
+  `priority <ticket> [--off]`, `force <ticket>` : une session peut le demander, l'utilisateur confirme ou refuse
+  dans une boîte de dialogue sous Windows (5 min au plus). Codes de sortie : 0, 1 ticket sorti
   de la file, 2 erreur, 3 refus, 75 toujours en attente après `--max` ou feu vert repris avant l'accusé de réception
   (relancer la même commande garde la place), 130 interrompu.
 - Garde : `clearway hook` / `clearway.exe hook` (événement PreToolUse sur stdin, refus sur stdout).
@@ -157,7 +160,7 @@ programme Windows ne peut démarrer : Codex passe donc uniquement par les outils
   `$XDG_RUNTIME_DIR/clearway-<pipe>.sock` hors de Windows. Une requête JSON par ligne
   (`{"method","path","params","body"}`), une réponse par ligne (`{"code","body"}`).
 - Routes : `POST /tickets`, `GET /tickets/{n}/wait` (`known`, `timeout_s`, `ack`), `POST /tickets/{n}/presence`,
-  `/extend`, `/resize`, `/priority`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
+  `/extend`, `/resize`, `/priority`, `/force`, `/release`, `/ack`, `DELETE /tickets/{n}`, `GET /status`, `POST /freeze`, `/window`, `/quit`, `/link`,
   `/link/heartbeat`.
 - Multiplexage : une requête avec un `"id"` tourne dans son propre fil et sa réponse porte le même `id`, dans n'importe
   quel ordre ; sans `id`, les requêtes sont servies l'une après l'autre. Le relais copie dans les deux sens à la fois
