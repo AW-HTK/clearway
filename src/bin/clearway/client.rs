@@ -53,8 +53,10 @@ clearway: queue for heavy tasks, served by clearway.exe (Windows) through its re
   clearway extend <ticket> <duration> \"<reason>\"   extends the duration of an active ticket
   clearway resize <ticket> [--ram 1G] [--cpu 1] [--gpu 2G] [--duration 20m] [\"<reason>\"]
       lowers the estimate of a waiting or active ticket, never raises it
-  clearway priority <ticket> [--off]      gives the ticket priority: no other admission, the active tickets stop
-                                          starting heavy commands; for you, not for the sessions
+  clearway priority <ticket> [--off] [\"<reason>\"]   asks to give the ticket priority (no other admission, the
+                                          active tickets start no new heavy command); the user confirms on Windows
+  clearway force <ticket> [\"<reason>\"]   asks to clear a waiting ticket at once, outside the queue order; the user
+                                          confirms on Windows
   clearway release <ticket> [--code N]    releases the slot
   clearway cancel <ticket>                withdraws the request or releases the slot
   clearway status                         queue, reserves and measures
@@ -77,8 +79,11 @@ clearway : file des tâches lourdes, servie par clearway.exe (Windows) à traver
   clearway extend <ticket> <durée> \"<raison>\"   allonge la durée d'un ticket actif
   clearway resize <ticket> [--ram 1G] [--cpu 1] [--gpu 2G] [--duration 20m] [\"<raison>\"]
       baisse l'estimation d'un ticket en attente ou actif, sans jamais la monter
-  clearway priority <ticket> [--off]      rend le ticket prioritaire : plus aucune admission, les tickets actifs ne
-                                          lancent plus de commande lourde ; pour vous, pas pour les sessions
+  clearway priority <ticket> [--off] [\"<raison>\"]   demande de rendre le ticket prioritaire (plus aucune
+                                          admission, les tickets actifs ne lancent plus de commande lourde) ;
+                                          l'utilisateur confirme sous Windows
+  clearway force <ticket> [\"<raison>\"]   demande le feu vert immédiat d'un ticket en attente, hors de l'ordre de la
+                                          file ; l'utilisateur confirme sous Windows
   clearway release <ticket> [--code N]    libère le créneau
   clearway cancel <ticket>                retire la demande ou libère le créneau
   clearway status                         file, réserves et mesures
@@ -184,7 +189,8 @@ fn execute(args: &[String]) -> Result<i32, String> {
         "wait" | "attend" => wait_cmd(left),
         "extend" | "prolonge" => extend_cmd(left),
         "resize" => resize_cmd(left),
-        "priority" => priority_cmd(left),
+        "priority" => ask_cmd(left, false),
+        "force" => ask_cmd(left, true),
         "release" | "fin" => end(left),
         "cancel" | "annule" => cancel_cmd(number(left)?),
         "status" | "statut" => status_view(),
@@ -1129,13 +1135,21 @@ fn resize_cmd(args: &[String]) -> Result<i32, String> {
     }
 }
 
-fn priority_cmd(args: &[String]) -> Result<i32, String> {
-    let id = number(args).map_err(|_| tr!("usage: clearway priority <ticket> [--off]", "usage : clearway priority <ticket> [--off]"))?;
+/// `clearway force` and `clearway priority`: the server asks the user, who answers in a dialog on Windows.
+fn ask_cmd(args: &[String], force: bool) -> Result<i32, String> {
+    let usage = if force {
+        tr!("usage: clearway force <ticket> [\"<reason>\"]", "usage : clearway force <ticket> [\"<raison>\"]")
+    } else {
+        tr!("usage: clearway priority <ticket> [--off] [\"<reason>\"]", "usage : clearway priority <ticket> [--off] [\"<raison>\"]")
+    };
+    let id = number(args).map_err(|_| usage)?;
     let o = options(&args[1..], false)?;
+    let body = json!({ "on": !o.off, "requester": default_session(), "reason": o.positionals.join(" ") });
+    let path = if force { format!("/tickets/{id}/force") } else { format!("/tickets/{id}/priority") };
     let mut client = Client::new()?;
-    let r = client.request("POST", &format!("/tickets/{id}/priority"), json!({ "on": !o.off }))?;
+    let r = client.request("POST", &path, body)?;
     match r.code {
-        200 => {
+        200 | 202 => {
             println!("{}", message(&r.body));
             Ok(0)
         }
@@ -1143,7 +1157,7 @@ fn priority_cmd(args: &[String]) -> Result<i32, String> {
             eprintln!("{}", message(&r.body));
             Ok(1)
         }
-        code => Err(tr!("priority of #{id} ({code}): {}", "priorité du #{id} ({code}) : {}", message(&r.body))),
+        code => Err(tr!("request for #{id} ({code}): {}", "demande pour le #{id} ({code}) : {}", message(&r.body))),
     }
 }
 

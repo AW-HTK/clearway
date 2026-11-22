@@ -37,8 +37,10 @@ minute, or the GPU.
    queue moves on at once. `resize` never raises a need.
 6. If you abandon the task, call `cancel(ticket)`.
 7. If the guard or `status` says another ticket has **priority**, start no new heavy command: let the current
-   one finish, then `release` your ticket and ask again later. Only the user gives a ticket priority; never
-   run `clearway priority` yourself.
+   one finish, then `release` your ticket and ask again later.
+8. `force` (clear a waiting ticket at once) and `priority` exist **only for an explicit request of the user**:
+   never use them on your own initiative. The user confirms or refuses in a dialog on Windows; the tool answers
+   at once, read the outcome with `status` or `await_clearance`.
 
 `status` shows the queue, the free resources and why each ticket waits. Report its explanation to the user
 when they ask why the task has not started.

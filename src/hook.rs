@@ -302,26 +302,6 @@ pub fn heavy(command: &str) -> Option<String> {
     heavy_at(command, 0)
 }
 
-/// `clearway priority …` in a shell line: giving priority is the user's call, never a session's.
-pub fn priority_request(command: &str) -> bool {
-    simple_commands(command).iter().any(|words| {
-        words
-            .iter()
-            .position(|w| program(w) == "clearway")
-            .and_then(|i| words.get(i + 1))
-            .is_some_and(|w| w == "priority")
-    })
-}
-
-pub fn priority_denial() -> String {
-    tr!(
-        "Clearway: giving a ticket priority is the user's decision. Ask them to run `clearway priority <ticket>` or to \
-         use \"Priority\" in the Clearway window.",
-        "Clearway : rendre un ticket prioritaire est la décision de l'utilisateur. Demande-lui de lancer « clearway \
-         priority <ticket> » ou d'utiliser « Prioritaire » dans la fenêtre Clearway."
-    )
-}
-
 /// `(session_id, command)` of a PreToolUse event whose tool runs a shell command.
 pub fn shell_command(input: &Value) -> Option<(String, String)> {
     let tool = input["tool_name"].as_str()?;

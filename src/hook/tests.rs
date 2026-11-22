@@ -178,12 +178,3 @@ fn priority_of_another_ticket_pauses_the_session() {
     other.priority = false;
     assert_eq!(decide("cargo build", "cargo build", "abc", &[], false, &[mine, other]), Verdict::Allow);
 }
-
-#[test]
-fn sessions_cannot_give_priority() {
-    assert!(priority_request("clearway priority 12"));
-    assert!(priority_request("cd /tmp && /usr/local/bin/clearway priority 12 --off"));
-    assert!(priority_request("clearway.exe priority 3"));
-    assert!(!priority_request("clearway status"));
-    assert!(!priority_request("echo 'clearway priority 3'"));
-}
